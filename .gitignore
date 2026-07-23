@@ -10,3 +10,7 @@ Thumbs.db
 # Local env / secrets
 .env
 .env.local
+
+# Graphify machine-specific state (not portable across machines — regenerated on next run)
+graphify-out/.graphify_python
+graphify-out/.graphify_root

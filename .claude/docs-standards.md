@@ -16,7 +16,12 @@ Implementation may begin only when all of the following exist and have cleared t
 
 ## Graphify regeneration
 
-`graphify-out/` is committed. Regenerate when a discovery/design/architecture phase completes, a batch of ADRs lands, or the glossary changes significantly — not on every commit. (Full cadence recommendation lands in Phase 9.)
+`graphify-out/` is committed. Validated cadence (Phase 9, run 2026-07-24 on the full doc set — 52 files, 141 nodes, 12 communities):
+
+- **Full rebuild** (`/graphify .`) when a Discovery/Design/Architecture/Planning phase completes, or a batch of ADRs lands. Confirmed this is the right trigger, not an arbitrary one: fixing a single doc (`docs/architecture/overview.md`'s empty Key Decisions table) produced a genuinely new community, not just an edge update — community structure, not just node content, shifts at these boundaries.
+- **Incremental `/graphify . --update`** for a single-doc fix — cache means unrelated files cost nothing. But cost scales with cross-reference density, not doc length: the initial 52-file build averaged ~5.2K tokens/file; re-extracting one doc after densifying its cross-references cost 47K tokens alone (~18% of the entire initial build). A "small" edit to a heavily-referenced doc (an ADR, Vision, Concept, MVP) is not necessarily a cheap regeneration.
+- **Not on every commit** — full rebuilds are too costly relative to typical doc-editing velocity. Reserve them for the phase/ADR-batch cadence above; use `--update` in between if a graph refresh is needed sooner.
+- Machine-specific state (`graphify-out/.graphify_python`, `.graphify_root`) is gitignored — not portable across machines, regenerated automatically on next run.
 
 ## Templates and where they live
 
