@@ -7,6 +7,7 @@
 
 use crate::log::checksum::decode_line;
 use crate::stack::InterruptionStack;
+use chrono::{DateTime, Utc};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -26,6 +27,11 @@ pub struct ReplayResult {
     pub next_seq: u64,
     /// True if a torn/corrupt trailing line was found and discarded.
     pub torn_line_discarded: bool,
+    /// The timestamp of the last successfully-parsed (non-torn) line, whether or
+    /// not it was actually applied (a pre-watermark line still counts — it was
+    /// still a real, durable write). Used at startup as the inferred end time
+    /// for a `recovered-gap` resolution when `stack.active` survives replay.
+    pub last_timestamp: Option<DateTime<Utc>>,
 }
 
 /// Replay the log at `path`. `watermark`: lines with `seq <= watermark` are
@@ -45,11 +51,12 @@ pub fn replay(
     let path = path.as_ref();
     let mut stack = starting_stack.unwrap_or_default();
     let mut last_seq_seen: Option<u64> = None;
+    let mut last_timestamp: Option<DateTime<Utc>> = None;
     let mut torn_line_discarded = false;
 
     if !path.exists() {
         let next_seq = watermark.map(|w| w + 1).unwrap_or(0);
-        return Ok(ReplayResult { stack, next_seq, torn_line_discarded: false });
+        return Ok(ReplayResult { stack, next_seq, torn_line_discarded: false, last_timestamp: None });
     }
 
     let file = File::open(path)?;
@@ -68,6 +75,7 @@ pub fn replay(
         };
 
         last_seq_seen = Some(record.seq);
+        last_timestamp = Some(record.timestamp);
 
         let already_in_snapshot = watermark.is_some_and(|w| record.seq <= w);
         if !already_in_snapshot {
@@ -80,7 +88,7 @@ pub fn replay(
     let next_seq_from_lines = last_seq_seen.map(|s| s + 1).unwrap_or(0);
     let next_seq_from_watermark = watermark.map(|w| w + 1).unwrap_or(0);
     let next_seq = next_seq_from_lines.max(next_seq_from_watermark);
-    Ok(ReplayResult { stack, next_seq, torn_line_discarded })
+    Ok(ReplayResult { stack, next_seq, torn_line_discarded, last_timestamp })
 }
 
 #[cfg(test)]
@@ -103,6 +111,23 @@ mod tests {
         assert_eq!(result.next_seq, 0);
         assert!(!result.torn_line_discarded);
         assert!(result.stack.active.is_none());
+        assert!(result.last_timestamp.is_none());
+    }
+
+    #[test]
+    fn last_timestamp_reflects_the_last_good_line_leftover_active_included() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let last_record = {
+            let mut writer = LogWriter::open(&path, 0).unwrap();
+            writer.append(payload("A")).unwrap();
+            writer
+                .append(TransitionPayload::Interrupt { name: "B".into(), project: None, client: None })
+                .unwrap()
+        };
+
+        let result = replay(&path, None, None).unwrap();
+        assert_eq!(result.last_timestamp, Some(last_record.timestamp));
     }
 
     #[test]

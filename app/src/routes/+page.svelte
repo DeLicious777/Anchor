@@ -1,18 +1,38 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import * as R from "ramda";
-  import { switchTask, interruptTask, returnPrevious, returnOriginal, completeTask, getState } from "$lib/api";
+  import { listen } from "@tauri-apps/api/event";
+  import { switchTask, interruptTask, returnPrevious, returnOriginal, completeTask, getState, onStateChanged } from "$lib/api";
   import type { StackView, TimeBlock } from "$lib/types";
 
   let name = $state("");
   let project = $state("");
   let client = $state("");
   let error = $state<string | null>(null);
+  let nameInput: HTMLInputElement;
 
   let view = $state<StackView>({ active: null, stack: [], closed: [] });
 
+  let unlistenState: (() => void) | undefined;
+  let unlistenFocus: (() => void) | undefined;
+
   onMount(async () => {
     await refresh(getState());
+    // Subsequent updates come from the event, not re-polling — this is what
+    // keeps the dashboard and mini widget from ever disagreeing.
+    unlistenState = await onStateChanged((updated) => {
+      view = updated;
+    });
+    // Fired by the Switch/Interrupt global hotkeys (see lib.rs) — this window
+    // is brought forward and focused there; here we just focus the input.
+    unlistenFocus = await listen("focus-name-input", () => {
+      nameInput?.focus();
+    });
+  });
+
+  onDestroy(() => {
+    unlistenState?.();
+    unlistenFocus?.();
   });
 
   async function refresh(promise: Promise<StackView>) {
@@ -76,7 +96,7 @@
   <section>
     <h2>New task</h2>
     <div class="row">
-      <input placeholder="Name" bind:value={name} />
+      <input placeholder="Name" bind:value={name} bind:this={nameInput} />
       <input placeholder="Project (optional)" bind:value={project} />
       <input placeholder="Client (optional)" bind:value={client} />
     </div>

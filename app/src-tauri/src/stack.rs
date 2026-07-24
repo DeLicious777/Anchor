@@ -135,8 +135,19 @@ impl InterruptionStack {
                 Ok(())
             }
             TransitionPayload::Heartbeat => {
-                // No stack-state effect this slice — heartbeats only bound
-                // recovered-gap inference accuracy (Slice 2), not implemented yet.
+                // No stack-state effect — heartbeats exist purely to bound
+                // recovered-gap inference accuracy (see `heartbeat.rs`), not to
+                // change what's active.
+                Ok(())
+            }
+            TransitionPayload::RecoverGap { inferred_end } => {
+                // Deliberately does NOT start a new active entry — whether to
+                // auto-resume is a caller decision (startup: no; live sleep/wake
+                // resume: yes, via a separate Start transition), not baked in here.
+                let mut current = self.active.take().ok_or(StackError::NoActiveTask)?;
+                current.end = Some(*inferred_end);
+                current.completion_reason = Some(CompletionReason::RecoveredGap);
+                self.closed.push(current);
                 Ok(())
             }
         }
@@ -263,6 +274,30 @@ mod tests {
         let new_active = s.active.as_ref().unwrap();
         assert_eq!(new_active.name, "A");
         assert_ne!(new_active.id, a_id);
+    }
+
+    #[test]
+    fn recover_gap_closes_active_with_inferred_end_and_does_not_auto_resume() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "A", 0);
+
+        let inferred_end = t(5); // e.g. the last heartbeat before a crash/sleep
+        s.apply(&TransitionPayload::RecoverGap { inferred_end }, t(100)).unwrap();
+
+        assert_eq!(s.closed.len(), 1);
+        assert_eq!(s.closed[0].name, "A");
+        assert_eq!(s.closed[0].end, Some(inferred_end), "end must be the inferred time, not the moment the gap was detected");
+        assert_eq!(s.closed[0].completion_reason, Some(CompletionReason::RecoveredGap));
+        assert!(s.active.is_none(), "RecoverGap must not auto-resume — that decision belongs to the caller");
+    }
+
+    #[test]
+    fn recover_gap_requires_an_active_task() {
+        let mut s = InterruptionStack::new();
+        let err = s
+            .apply(&TransitionPayload::RecoverGap { inferred_end: t(0) }, t(10))
+            .unwrap_err();
+        assert_eq!(err, StackError::NoActiveTask);
     }
 
     #[test]

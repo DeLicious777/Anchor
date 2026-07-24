@@ -84,7 +84,13 @@ pub enum TransitionPayload {
     ReturnPrevious,
     ReturnOriginal,
     Complete,
-    /// Not implemented this slice (Slice 2: heartbeat timer) — included now so the
-    /// on-disk schema doesn't need a breaking change later.
     Heartbeat,
+    /// Closes the active entry as `recovered-gap` with an explicitly-carried end
+    /// time (not "now" — the gap was detected after the fact, whether at startup
+    /// after a crash or on live resume from sleep/hibernate). Deliberately does
+    /// NOT start a new active entry itself: startup recovery and live-resume
+    /// recovery differ on whether to auto-resume, so that decision is made by the
+    /// caller (see `state::resolve_startup_gap` vs. the Slice 2 power-resume path),
+    /// not baked into this transition.
+    RecoverGap { inferred_end: DateTime<Utc> },
 }

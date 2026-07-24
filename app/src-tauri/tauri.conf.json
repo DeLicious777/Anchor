@@ -12,9 +12,22 @@
   "app": {
     "windows": [
       {
-        "title": "app",
+        "label": "main",
+        "title": "Anchor",
         "width": 800,
         "height": 600
+      },
+      {
+        "label": "widget",
+        "title": "Anchor",
+        "url": "/widget",
+        "width": 260,
+        "height": 90,
+        "alwaysOnTop": true,
+        "decorations": false,
+        "skipTaskbar": true,
+        "resizable": false,
+        "shadow": false
       }
     ],
     "security": {
