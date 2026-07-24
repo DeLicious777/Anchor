@@ -47,6 +47,26 @@ impl TimeBlock {
     }
 }
 
+/// A reusable preset pre-filling a Time Block's name/project/client for fast
+/// starts on recurring activities (see `docs/product/features/task-templates.md`).
+/// Deliberately never referenced by `TimeBlock` — a template only ever pre-fills
+/// the quick-input's plain string fields, so editing/deleting one can never
+/// retroactively affect an already-recorded Time Block; that guarantee falls out
+/// of this struct simply not being linked, not from any enforcement elsewhere.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskTemplate {
+    pub id: Uuid,
+    pub name: String,
+    pub project: Option<String>,
+    pub client: Option<String>,
+}
+
+impl TaskTemplate {
+    pub fn new(name: String, project: Option<String>, client: Option<String>) -> Self {
+        Self { id: Uuid::new_v4(), name, project, client }
+    }
+}
+
 /// A task paused by an Interrupt, waiting on the stack to be resumed or skipped.
 /// Carries enough identity to start a brand-new Time Block when it's eventually
 /// resumed — resuming never reopens the original block (see conversation:

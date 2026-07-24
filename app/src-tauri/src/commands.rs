@@ -8,11 +8,13 @@
 //! then applied to the real in-memory stack. This is the concrete mechanism
 //! behind "never durably log a transition that couldn't actually happen."
 
-use crate::model::{StackFrame, TimeBlock, TransitionPayload};
+use crate::model::{StackFrame, TaskTemplate, TimeBlock, TransitionPayload};
 use crate::stack::InterruptionStack;
 use crate::state::AppState;
+use crate::templates::{mutate_templates, TemplateState};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
+use uuid::Uuid;
 
 /// Every window listens for this to stay in sync — emitted after every
 /// successful mutation, from the command boundary and from the background
@@ -131,6 +133,55 @@ pub fn get_state(state: State<AppState>) -> Result<StackView, String> {
     Ok(StackView::from(&inner.stack))
 }
 
+/// Templates are an entirely separate slice from the interruption stack — no
+/// transition log, no dry-run (CRUD here is unconditional), own event so
+/// listeners never have to guess which part of the app state changed.
+pub const TEMPLATES_CHANGED_EVENT: &str = "templates-changed";
+
+pub fn emit_templates_changed(app: &AppHandle, templates: &[TaskTemplate]) {
+    let _ = app.emit(TEMPLATES_CHANGED_EVENT, templates);
+}
+
+#[tauri::command]
+pub fn create_template(
+    app: AppHandle,
+    templates: State<TemplateState>,
+    name: String,
+    project: Option<String>,
+    client: Option<String>,
+) -> Result<TaskTemplate, String> {
+    let (created, list) = mutate_templates(&templates, |store| Ok(store.create(name, project, client)))?;
+    emit_templates_changed(&app, &list);
+    Ok(created)
+}
+
+#[tauri::command]
+pub fn update_template(
+    app: AppHandle,
+    templates: State<TemplateState>,
+    id: Uuid,
+    name: String,
+    project: Option<String>,
+    client: Option<String>,
+) -> Result<TaskTemplate, String> {
+    let (updated, list) = mutate_templates(&templates, |store| store.update(id, name, project, client))?;
+    emit_templates_changed(&app, &list);
+    Ok(updated)
+}
+
+#[tauri::command]
+pub fn delete_template(app: AppHandle, templates: State<TemplateState>, id: Uuid) -> Result<(), String> {
+    let (_, list) = mutate_templates(&templates, |store| store.delete(id))?;
+    emit_templates_changed(&app, &list);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_templates(templates: State<TemplateState>) -> Result<Vec<TaskTemplate>, String> {
+    let store = templates.inner.lock().map_err(|_| "template store lock poisoned".to_string())?;
+    Ok(store.list().to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +298,88 @@ mod tests {
         assert!(inner.stack.active.is_none());
         let a = inner.stack.closed.iter().find(|b| b.name == "A").unwrap();
         assert_eq!(a.completion_reason, Some(crate::model::CompletionReason::RecoveredGap));
+    }
+
+    #[test]
+    fn create_update_delete_template_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates_state = TemplateState::init(dir.path().join("templates.json"));
+
+        let (created, list) =
+            mutate_templates(&templates_state, |store| Ok(store.create("Standup".into(), Some("Acme".into()), None)))
+                .unwrap();
+        assert_eq!(list.len(), 1);
+
+        let (updated, list) = mutate_templates(&templates_state, |store| {
+            store.update(created.id, "Standup".into(), Some("Globex".into()), None)
+        })
+        .unwrap();
+        assert_eq!(updated.project, Some("Globex".to_string()));
+        assert_eq!(list.len(), 1);
+
+        let (_, list) = mutate_templates(&templates_state, |store| store.delete(created.id)).unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn templates_persist_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("templates.json");
+
+        {
+            let templates_state = TemplateState::init(&path);
+            mutate_templates(&templates_state, |store| Ok(store.create("Standup".into(), None, None))).unwrap();
+        }
+
+        let reloaded = TemplateState::init(&path);
+        assert_eq!(reloaded.inner.lock().unwrap().list().len(), 1);
+    }
+
+    /// The explicit Acceptance-Criteria-proving test: editing (or deleting) a
+    /// template must never retroactively affect a Time Block already recorded
+    /// from it. Proves the two systems are decoupled at the DATA level, not
+    /// just in the UI — a future regression (e.g. adding a `template_id` field
+    /// to `TimeBlock`) would break this test.
+    #[test]
+    fn editing_and_deleting_a_template_does_not_change_an_already_recorded_time_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("log.jsonl");
+        let templates_path = dir.path().join("templates.json");
+
+        let (app_state, _report) = AppState::init(&log_path).unwrap();
+        let templates_state = TemplateState::init(&templates_path);
+
+        let (template, _) = mutate_templates(&templates_state, |store| {
+            Ok(store.create("Standup".into(), Some("Acme".into()), None))
+        })
+        .unwrap();
+
+        // Stands in for "the user selected the template via autocomplete, then
+        // pressed Switch" — the frontend only ever sends plain strings, never a
+        // template reference, so this is a faithful simulation.
+        apply_transition(&app_state, |_| TransitionPayload::Start {
+            name: template.name.clone(),
+            project: template.project.clone(),
+            client: None,
+        })
+        .unwrap();
+
+        // Now edit the template's project.
+        mutate_templates(&templates_state, |store| {
+            store.update(template.id, "Standup".into(), Some("Globex".into()), None)
+        })
+        .unwrap();
+
+        let inner = app_state.inner.lock().unwrap();
+        let recorded = inner.stack.active.as_ref().unwrap();
+        assert_eq!(recorded.project, Some("Acme".to_string()), "already-recorded Time Block must keep its original value");
+        drop(inner);
+
+        // Deleting the template afterward must not touch the Time Block either
+        // — trivially true since TimeBlock has no template reference at all,
+        // but asserted explicitly as a regression guard.
+        mutate_templates(&templates_state, |store| store.delete(template.id)).unwrap();
+        let inner = app_state.inner.lock().unwrap();
+        assert_eq!(inner.stack.active.as_ref().unwrap().project, Some("Acme".to_string()));
     }
 }

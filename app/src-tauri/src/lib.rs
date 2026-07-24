@@ -7,12 +7,14 @@ pub mod power;
 pub mod settings;
 pub mod stack;
 pub mod state;
+pub mod templates;
 
 use commands::{apply_transition, emit_state_changed};
 use model::TransitionPayload;
 use settings::HotkeyBindings;
 use state::AppState;
 use tauri::{Emitter, Manager};
+use templates::TemplateState;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[derive(Clone, Copy, Debug)]
@@ -118,6 +120,9 @@ pub fn run() {
             }
             app.manage(RegisteredHotkeys(registered));
 
+            let templates_path = paths::templates_file_path(handle)?;
+            app.manage(TemplateState::init(templates_path));
+
             let heartbeat_handle = handle.clone();
             std::thread::spawn(move || heartbeat::run(heartbeat_handle));
 
@@ -133,6 +138,10 @@ pub fn run() {
             commands::return_original,
             commands::complete,
             commands::get_state,
+            commands::create_template,
+            commands::update_template,
+            commands::delete_template,
+            commands::list_templates,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

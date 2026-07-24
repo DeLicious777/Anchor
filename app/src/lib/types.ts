@@ -22,3 +22,10 @@ export interface StackView {
   stack: StackFrame[];
   closed: TimeBlock[];
 }
+
+export interface TaskTemplate {
+  id: string;
+  name: string;
+  project: string | null;
+  client: string | null;
+}

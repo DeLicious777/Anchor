@@ -2,8 +2,21 @@
   import { onMount, onDestroy } from "svelte";
   import * as R from "ramda";
   import { listen } from "@tauri-apps/api/event";
-  import { switchTask, interruptTask, returnPrevious, returnOriginal, completeTask, getState, onStateChanged } from "$lib/api";
-  import type { StackView, TimeBlock } from "$lib/types";
+  import {
+    switchTask,
+    interruptTask,
+    returnPrevious,
+    returnOriginal,
+    completeTask,
+    getState,
+    onStateChanged,
+    listTemplates,
+    onTemplatesChanged,
+    createTemplate,
+    updateTemplate,
+    deleteTemplate,
+  } from "$lib/api";
+  import type { StackView, TimeBlock, TaskTemplate } from "$lib/types";
 
   let name = $state("");
   let project = $state("");
@@ -13,8 +26,16 @@
 
   let view = $state<StackView>({ active: null, stack: [], closed: [] });
 
+  let templates = $state<TaskTemplate[]>([]);
+  let templateFormName = $state("");
+  let templateFormProject = $state("");
+  let templateFormClient = $state("");
+  let editingTemplateId = $state<string | null>(null);
+  let showSuggestions = $state(false);
+
   let unlistenState: (() => void) | undefined;
   let unlistenFocus: (() => void) | undefined;
+  let unlistenTemplates: (() => void) | undefined;
 
   onMount(async () => {
     await refresh(getState());
@@ -28,11 +49,17 @@
     unlistenFocus = await listen("focus-name-input", () => {
       nameInput?.focus();
     });
+
+    templates = await listTemplates();
+    unlistenTemplates = await onTemplatesChanged((updated) => {
+      templates = updated;
+    });
   });
 
   onDestroy(() => {
     unlistenState?.();
     unlistenFocus?.();
+    unlistenTemplates?.();
   });
 
   async function refresh(promise: Promise<StackView>) {
@@ -59,12 +86,69 @@
     refresh(interruptTask(name.trim(), nullable(project), nullable(client)));
   }
 
+  function selectTemplate(t: TaskTemplate) {
+    name = t.name;
+    project = t.project ?? "";
+    client = t.client ?? "";
+    showSuggestions = false;
+  }
+
+  function resetTemplateForm() {
+    editingTemplateId = null;
+    templateFormName = "";
+    templateFormProject = "";
+    templateFormClient = "";
+  }
+
+  function editTemplate(t: TaskTemplate) {
+    editingTemplateId = t.id;
+    templateFormName = t.name;
+    templateFormProject = t.project ?? "";
+    templateFormClient = t.client ?? "";
+  }
+
+  async function saveTemplate() {
+    if (!templateFormName.trim()) return;
+    error = null;
+    try {
+      if (editingTemplateId) {
+        await updateTemplate(editingTemplateId, templateFormName.trim(), nullable(templateFormProject), nullable(templateFormClient));
+      } else {
+        await createTemplate(templateFormName.trim(), nullable(templateFormProject), nullable(templateFormClient));
+      }
+      resetTemplateForm();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function removeTemplate(id: string) {
+    error = null;
+    try {
+      await deleteTemplate(id);
+      if (editingTemplateId === id) resetTemplateForm();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   function durationLabel(block: TimeBlock): string {
     if (!block.end) return "(active)";
     const ms = new Date(block.end).getTime() - new Date(block.start).getTime();
     const minutes = Math.round(ms / 60000);
     return `${minutes} min`;
   }
+
+  // Case-insensitive substring match on the name being typed, capped so the
+  // dropdown never grows unbounded — a display concern, not a perf workaround.
+  let templateSuggestions = $derived(
+    name.trim().length === 0
+      ? []
+      : R.take(
+          8,
+          templates.filter((t) => t.name.toLowerCase().includes(name.trim().toLowerCase())),
+        ),
+  );
 
   // Most-recently-closed first — real use of Ramda, not just an installed-and-unused dependency.
   let closedMostRecentFirst = $derived(R.reverse(R.sortBy((b: TimeBlock) => b.start, view.closed)));
@@ -95,14 +179,61 @@
 
   <section>
     <h2>New task</h2>
-    <div class="row">
-      <input placeholder="Name" bind:value={name} bind:this={nameInput} />
+    <div class="row autocomplete">
+      <input
+        placeholder="Name"
+        bind:value={name}
+        bind:this={nameInput}
+        onfocus={() => (showSuggestions = true)}
+        onblur={() => (showSuggestions = false)}
+      />
       <input placeholder="Project (optional)" bind:value={project} />
       <input placeholder="Client (optional)" bind:value={client} />
+      {#if showSuggestions && templateSuggestions.length > 0}
+        <ul class="suggestions">
+          {#each templateSuggestions as t}
+            <li>
+              <button type="button" onmousedown={() => selectTemplate(t)}>
+                {t.name}{#if t.project} · {t.project}{/if}{#if t.client} · {t.client}{/if}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </div>
     <div class="row">
       <button onclick={doSwitch}>Switch</button>
       <button onclick={doInterrupt}>Interrupt</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Task templates</h2>
+    {#if templates.length === 0}
+      <p>No templates yet.</p>
+    {:else}
+      <ul class="template-list">
+        {#each templates as t}
+          <li>
+            <span>{t.name}{#if t.project} · {t.project}{/if}{#if t.client} · {t.client}{/if}</span>
+            <span class="template-actions">
+              <button type="button" onclick={() => editTemplate(t)}>Edit</button>
+              <button type="button" onclick={() => removeTemplate(t.id)}>Delete</button>
+            </span>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    <div class="row">
+      <input placeholder="Name" bind:value={templateFormName} />
+      <input placeholder="Project (optional)" bind:value={templateFormProject} />
+      <input placeholder="Client (optional)" bind:value={templateFormClient} />
+    </div>
+    <div class="row">
+      <button onclick={saveTemplate}>{editingTemplateId ? "Save" : "Create"}</button>
+      {#if editingTemplateId}
+        <button type="button" onclick={resetTemplateForm}>Cancel</button>
+      {/if}
     </div>
   </section>
 
@@ -213,5 +344,48 @@
   .error {
     color: #b00020;
     font-weight: 600;
+  }
+  .autocomplete {
+    position: relative;
+  }
+  .suggestions {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 10;
+    width: 100%;
+    margin: 0;
+    padding: 0.25rem;
+    list-style: none;
+    background: white;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  }
+  .suggestions li button {
+    width: 100%;
+    text-align: left;
+    padding: 0.4em 0.6em;
+    background: none;
+    border: none;
+  }
+  .suggestions li button:hover {
+    background: #f0f0f0;
+  }
+  .template-list {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 1rem 0;
+  }
+  .template-list li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.3em 0;
+    border-bottom: 1px solid #eee;
+  }
+  .template-actions {
+    display: flex;
+    gap: 0.5rem;
   }
 </style>
