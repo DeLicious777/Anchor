@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { StackView, TaskTemplate } from "./types";
+import { save } from "@tauri-apps/plugin-dialog";
+import type { ExportSettings, StackView, TaskTemplate } from "./types";
 
 const STATE_CHANGED_EVENT = "state-changed";
 const TEMPLATES_CHANGED_EVENT = "templates-changed";
@@ -66,4 +67,44 @@ export function deleteTemplate(id: string): Promise<void> {
 
 export function listTemplates(): Promise<TaskTemplate[]> {
   return invoke("list_templates");
+}
+
+export function getExportSettings(): Promise<ExportSettings> {
+  return invoke("get_export_settings");
+}
+
+export function updateExportSettings(roundingEnabled: boolean, roundingIntervalMinutes: number): Promise<ExportSettings> {
+  return invoke("update_export_settings", { roundingEnabled, roundingIntervalMinutes });
+}
+
+export function exportXlsx(
+  path: string,
+  rangeStart: string,
+  rangeEnd: string,
+  roundingEnabled: boolean,
+  roundingIntervalMinutes: number,
+): Promise<void> {
+  return invoke("export_xlsx", { path, rangeStart, rangeEnd, roundingEnabled, roundingIntervalMinutes });
+}
+
+export function exportJson(
+  path: string,
+  rangeStart: string,
+  rangeEnd: string,
+  roundingEnabled: boolean,
+  roundingIntervalMinutes: number,
+): Promise<void> {
+  return invoke("export_json", { path, rangeStart, rangeEnd, roundingEnabled, roundingIntervalMinutes });
+}
+
+/**
+ * Native "Save As" dialog (tauri-plugin-dialog) — the user picks the
+ * destination, we never invent our own file-picker UI. Returns null if the
+ * user cancelled.
+ */
+export function chooseSaveLocation(suggestedName: string, extension: "xlsx" | "json"): Promise<string | null> {
+  return save({
+    defaultPath: suggestedName,
+    filters: [{ name: extension.toUpperCase(), extensions: [extension] }],
+  });
 }

@@ -1,4 +1,6 @@
 pub mod commands;
+pub mod export;
+pub mod export_settings;
 pub mod heartbeat;
 pub mod log;
 pub mod model;
@@ -10,6 +12,7 @@ pub mod state;
 pub mod templates;
 
 use commands::{apply_transition, emit_state_changed};
+use export_settings::ExportSettingsState;
 use model::TransitionPayload;
 use settings::HotkeyBindings;
 use state::AppState;
@@ -34,6 +37,7 @@ struct RegisteredHotkeys(Vec<(Shortcut, HotkeyAction)>);
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -123,6 +127,9 @@ pub fn run() {
             let templates_path = paths::templates_file_path(handle)?;
             app.manage(TemplateState::init(templates_path));
 
+            let export_settings_path = paths::export_settings_file_path(handle)?;
+            app.manage(ExportSettingsState::init(export_settings_path));
+
             let heartbeat_handle = handle.clone();
             std::thread::spawn(move || heartbeat::run(heartbeat_handle));
 
@@ -142,6 +149,10 @@ pub fn run() {
             commands::update_template,
             commands::delete_template,
             commands::list_templates,
+            commands::get_export_settings,
+            commands::update_export_settings,
+            commands::export_xlsx,
+            commands::export_json,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

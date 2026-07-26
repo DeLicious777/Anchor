@@ -15,8 +15,13 @@
     createTemplate,
     updateTemplate,
     deleteTemplate,
+    getExportSettings,
+    updateExportSettings,
+    chooseSaveLocation,
+    exportXlsx,
+    exportJson,
   } from "$lib/api";
-  import type { StackView, TimeBlock, TaskTemplate } from "$lib/types";
+  import type { StackView, TimeBlock, TaskTemplate, ExportSettings } from "$lib/types";
 
   let name = $state("");
   let project = $state("");
@@ -32,6 +37,12 @@
   let templateFormClient = $state("");
   let editingTemplateId = $state<string | null>(null);
   let showSuggestions = $state(false);
+
+  let exportSettings = $state<ExportSettings>({ rounding_enabled: true, rounding_interval_minutes: 15 });
+  let rangePreset = $state<"today" | "this-week" | "custom">("today");
+  let customStart = $state("");
+  let customEnd = $state("");
+  let exportMessage = $state<string | null>(null);
 
   let unlistenState: (() => void) | undefined;
   let unlistenFocus: (() => void) | undefined;
@@ -54,6 +65,8 @@
     unlistenTemplates = await onTemplatesChanged((updated) => {
       templates = updated;
     });
+
+    exportSettings = await getExportSettings();
   });
 
   onDestroy(() => {
@@ -127,6 +140,75 @@
     try {
       await deleteTemplate(id);
       if (editingTemplateId === id) resetTemplateForm();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // Local-time range boundaries, converted to UTC ISO strings at the backend
+  // call boundary — the backend only ever deals in two concrete timestamps,
+  // never in the notion of "today" or "this week" itself.
+  function startOfLocalDay(d: Date): Date {
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  }
+
+  function addDays(d: Date, days: number): Date {
+    const r = new Date(d);
+    r.setDate(r.getDate() + days);
+    return r;
+  }
+
+  // "This Week" starts Monday (ISO week) — Date.getDay() is 0=Sunday..6=Saturday.
+  function mostRecentMonday(d: Date): Date {
+    const daysSinceMonday = (d.getDay() + 6) % 7;
+    return addDays(startOfLocalDay(d), -daysSinceMonday);
+  }
+
+  function resolveRange(): { start: Date; end: Date } | null {
+    if (rangePreset === "today") {
+      const start = startOfLocalDay(new Date());
+      return { start, end: addDays(start, 1) };
+    }
+    if (rangePreset === "this-week") {
+      const start = mostRecentMonday(new Date());
+      return { start, end: addDays(start, 7) };
+    }
+    if (!customStart || !customEnd) return null;
+    const start = new Date(`${customStart}T00:00:00`);
+    const end = addDays(new Date(`${customEnd}T00:00:00`), 1); // inclusive end day
+    return { start, end };
+  }
+
+  async function onRoundingChange() {
+    error = null;
+    try {
+      exportSettings = await updateExportSettings(exportSettings.rounding_enabled, exportSettings.rounding_interval_minutes);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function doExport(kind: "xlsx" | "json") {
+    error = null;
+    exportMessage = null;
+    const range = resolveRange();
+    if (!range) {
+      error = "Select a valid custom date range.";
+      return;
+    }
+    try {
+      const suggested = `anchor-export-${new Date().toISOString().slice(0, 10)}.${kind}`;
+      const path = await chooseSaveLocation(suggested, kind);
+      if (!path) return; // user cancelled the save dialog
+
+      const rangeStart = range.start.toISOString();
+      const rangeEnd = range.end.toISOString();
+      if (kind === "xlsx") {
+        await exportXlsx(path, rangeStart, rangeEnd, exportSettings.rounding_enabled, exportSettings.rounding_interval_minutes);
+      } else {
+        await exportJson(path, rangeStart, rangeEnd, exportSettings.rounding_enabled, exportSettings.rounding_interval_minutes);
+      }
+      exportMessage = `Exported to ${path}`;
     } catch (e) {
       error = String(e);
     }
@@ -238,6 +320,44 @@
   </section>
 
   <section>
+    <h2>Export</h2>
+    {#if exportMessage}
+      <p class="success">{exportMessage}</p>
+    {/if}
+    <div class="row">
+      <label><input type="radio" name="range-preset" value="today" bind:group={rangePreset} /> Today</label>
+      <label><input type="radio" name="range-preset" value="this-week" bind:group={rangePreset} /> This Week</label>
+      <label><input type="radio" name="range-preset" value="custom" bind:group={rangePreset} /> Custom</label>
+    </div>
+    {#if rangePreset === "custom"}
+      <div class="row">
+        <input type="date" bind:value={customStart} />
+        <input type="date" bind:value={customEnd} />
+      </div>
+    {/if}
+    <div class="row">
+      <label>
+        <input type="checkbox" bind:checked={exportSettings.rounding_enabled} onchange={onRoundingChange} />
+        Round durations
+      </label>
+      <input
+        type="number"
+        min="1"
+        step="1"
+        style="max-width: 6rem"
+        bind:value={exportSettings.rounding_interval_minutes}
+        onchange={onRoundingChange}
+        disabled={!exportSettings.rounding_enabled}
+      />
+      <span>minutes</span>
+    </div>
+    <div class="row">
+      <button onclick={() => doExport("xlsx")}>Export XLSX</button>
+      <button onclick={() => doExport("json")}>Export JSON</button>
+    </div>
+  </section>
+
+  <section>
     <h2>Active</h2>
     {#if view.active}
       <p><strong>{view.active.name}</strong>{#if view.active.project} · {view.active.project}{/if}{#if view.active.client} · {view.active.client}{/if}</p>
@@ -343,6 +463,10 @@
   }
   .error {
     color: #b00020;
+    font-weight: 600;
+  }
+  .success {
+    color: #0a7a2f;
     font-weight: 600;
   }
   .autocomplete {

@@ -21,3 +21,9 @@ pub fn templates_file_path(app: &AppHandle) -> Result<PathBuf, Box<dyn std::erro
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("templates.json"))
 }
+
+pub fn export_settings_file_path(app: &AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join("export_settings.json"))
+}

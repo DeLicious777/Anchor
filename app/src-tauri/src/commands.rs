@@ -8,10 +8,13 @@
 //! then applied to the real in-memory stack. This is the concrete mechanism
 //! behind "never durably log a transition that couldn't actually happen."
 
+use crate::export;
+use crate::export_settings::{mutate_export_settings, ExportSettings, ExportSettingsState};
 use crate::model::{StackFrame, TaskTemplate, TimeBlock, TransitionPayload};
 use crate::stack::InterruptionStack;
 use crate::state::AppState;
 use crate::templates::{mutate_templates, TemplateState};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
@@ -180,6 +183,70 @@ pub fn delete_template(app: AppHandle, templates: State<TemplateState>, id: Uuid
 pub fn list_templates(templates: State<TemplateState>) -> Result<Vec<TaskTemplate>, String> {
     let store = templates.inner.lock().map_err(|_| "template store lock poisoned".to_string())?;
     Ok(store.list().to_vec())
+}
+
+/// Export is a read-only view over the current in-memory stack (itself a
+/// faithful materialization of the durable log via replay) — no separate
+/// re-read of the log file, and no `.apply()` call, so the durable timeline
+/// can never be touched by exporting.
+#[tauri::command]
+pub fn get_export_settings(settings: State<ExportSettingsState>) -> Result<ExportSettings, String> {
+    let inner = settings.inner.lock().map_err(|_| "export settings lock poisoned".to_string())?;
+    Ok(inner.clone())
+}
+
+#[tauri::command]
+pub fn update_export_settings(
+    settings: State<ExportSettingsState>,
+    rounding_enabled: bool,
+    rounding_interval_minutes: u32,
+) -> Result<ExportSettings, String> {
+    mutate_export_settings(&settings, |s| {
+        s.rounding_enabled = rounding_enabled;
+        s.rounding_interval_minutes = rounding_interval_minutes;
+    })
+}
+
+fn rounding_interval(rounding_enabled: bool, rounding_interval_minutes: u32) -> Option<u32> {
+    rounding_enabled.then_some(rounding_interval_minutes)
+}
+
+/// Reads the current in-memory stack under its lock and filters to the given
+/// range. Takes `&AppState` (not `State<AppState>`) so it's directly callable
+/// from unit tests without a running Tauri app — the `#[tauri::command]`
+/// wrappers below just pass their `State` through (it derefs to `&AppState`).
+fn export_blocks_in_range(state: &AppState, range_start: DateTime<Utc>, range_end: DateTime<Utc>) -> Result<Vec<TimeBlock>, String> {
+    let inner = state.inner.lock().map_err(|_| "state lock poisoned".to_string())?;
+    Ok(export::blocks_in_range(&inner.stack.closed, inner.stack.active.as_ref(), range_start, range_end, chrono::Utc::now()))
+}
+
+#[tauri::command]
+pub fn export_xlsx(
+    state: State<AppState>,
+    path: String,
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    rounding_enabled: bool,
+    rounding_interval_minutes: u32,
+) -> Result<(), String> {
+    let blocks = export_blocks_in_range(&state, range_start, range_end)?;
+    let rows = export::xlsx_rows(&blocks, rounding_interval(rounding_enabled, rounding_interval_minutes));
+    export::write_xlsx(&rows, std::path::Path::new(&path))
+}
+
+#[tauri::command]
+pub fn export_json(
+    state: State<AppState>,
+    path: String,
+    range_start: DateTime<Utc>,
+    range_end: DateTime<Utc>,
+    rounding_enabled: bool,
+    rounding_interval_minutes: u32,
+) -> Result<(), String> {
+    let blocks = export_blocks_in_range(&state, range_start, range_end)?;
+    let payload = export::json_export(&blocks, rounding_interval(rounding_enabled, rounding_interval_minutes));
+    let json = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -381,5 +448,54 @@ mod tests {
         mutate_templates(&templates_state, |store| store.delete(template.id)).unwrap();
         let inner = app_state.inner.lock().unwrap();
         assert_eq!(inner.stack.active.as_ref().unwrap().project, Some("Acme".to_string()));
+    }
+
+    /// The explicit AC-proving test for Export: exporting (both XLSX and JSON)
+    /// must never touch the durable transition log — not "the code doesn't
+    /// call write on it" but an actual byte-for-byte comparison of the log
+    /// file before and after.
+    #[test]
+    fn exporting_leaves_the_underlying_transition_log_byte_for_byte_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("log.jsonl");
+
+        let (app_state, _report) = AppState::init(&log_path).unwrap();
+        apply_transition(&app_state, |_| TransitionPayload::Start {
+            name: "A".into(),
+            project: Some("Acme".into()),
+            client: None,
+        })
+        .unwrap();
+        apply_transition(&app_state, |_| TransitionPayload::Interrupt {
+            name: "B".into(),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+        apply_transition(&app_state, |_| TransitionPayload::ReturnPrevious).unwrap();
+        apply_transition(&app_state, |_| TransitionPayload::Complete).unwrap();
+
+        let before = std::fs::read(&log_path).unwrap();
+
+        let range_start = chrono::Utc::now() - chrono::Duration::days(1);
+        let range_end = chrono::Utc::now() + chrono::Duration::days(1);
+        let blocks = export_blocks_in_range(&app_state, range_start, range_end).unwrap();
+        // Start A, Interrupt B, ReturnPrevious (resolves paused A as explicit
+        // and starts a brand-new A2 block — resuming never reopens the
+        // original), Complete (closes A2) => three independent closed blocks.
+        assert_eq!(blocks.len(), 3, "the paused-then-resolved A, the interrupting B, and the resumed A2 must all be in range");
+
+        let xlsx_path = dir.path().join("out.xlsx");
+        let rows = export::xlsx_rows(&blocks, Some(15));
+        export::write_xlsx(&rows, &xlsx_path).unwrap();
+
+        let json_path = dir.path().join("out.json");
+        let payload = export::json_export(&blocks, None);
+        std::fs::write(&json_path, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+
+        let after = std::fs::read(&log_path).unwrap();
+        assert_eq!(before, after, "exporting must never mutate the durable transition log");
+        assert!(xlsx_path.exists());
+        assert!(json_path.exists());
     }
 }

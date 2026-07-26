@@ -29,3 +29,8 @@ export interface TaskTemplate {
   project: string | null;
   client: string | null;
 }
+
+export interface ExportSettings {
+  rounding_enabled: boolean;
+  rounding_interval_minutes: number;
+}
