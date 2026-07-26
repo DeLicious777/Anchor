@@ -22,6 +22,7 @@
     exportJson,
   } from "$lib/api";
   import type { StackView, TimeBlock, TaskTemplate, ExportSettings } from "$lib/types";
+  import { formatElapsed } from "$lib/time";
 
   let name = $state("");
   let project = $state("");
@@ -44,9 +45,14 @@
   let customEnd = $state("");
   let exportMessage = $state<string | null>(null);
 
+  // Ticks once a second purely to re-derive the active-task timer below — never
+  // sent anywhere, never persisted, just drives the live elapsed-time display.
+  let now = $state(Date.now());
+
   let unlistenState: (() => void) | undefined;
   let unlistenFocus: (() => void) | undefined;
   let unlistenTemplates: (() => void) | undefined;
+  let timerInterval: ReturnType<typeof setInterval> | undefined;
 
   onMount(async () => {
     await refresh(getState());
@@ -67,12 +73,17 @@
     });
 
     exportSettings = await getExportSettings();
+
+    timerInterval = setInterval(() => {
+      now = Date.now();
+    }, 1000);
   });
 
   onDestroy(() => {
     unlistenState?.();
     unlistenFocus?.();
     unlistenTemplates?.();
+    clearInterval(timerInterval);
   });
 
   async function refresh(promise: Promise<StackView>) {
@@ -232,6 +243,9 @@
         ),
   );
 
+  // Re-derives every second as `now` ticks — the only reason `now` exists.
+  let activeElapsed = $derived(view.active ? formatElapsed(now - new Date(view.active.start).getTime()) : null);
+
   // Most-recently-closed first — real use of Ramda, not just an installed-and-unused dependency.
   let closedMostRecentFirst = $derived(R.reverse(R.sortBy((b: TimeBlock) => b.start, view.closed)));
 
@@ -362,6 +376,7 @@
     {#if view.active}
       <p><strong>{view.active.name}</strong>{#if view.active.project} · {view.active.project}{/if}{#if view.active.client} · {view.active.client}{/if}</p>
       <p>started {new Date(view.active.start).toLocaleTimeString()}</p>
+      <p class="timer">{activeElapsed}</p>
     {:else}
       <p>No active task.</p>
     {/if}
@@ -464,6 +479,12 @@
   .error {
     color: #b00020;
     font-weight: 600;
+  }
+  .timer {
+    font-variant-numeric: tabular-nums;
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0.25rem 0;
   }
   .success {
     color: #0a7a2f;

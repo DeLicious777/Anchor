@@ -1,10 +1,16 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { getState, onStateChanged } from "$lib/api";
+  import { formatElapsed } from "$lib/time";
   import type { StackView } from "$lib/types";
 
   let view = $state<StackView>({ active: null, stack: [], closed: [] });
   let unlisten: (() => void) | undefined;
+  let timerInterval: ReturnType<typeof setInterval> | undefined;
+
+  // Ticks once a second purely to re-derive `elapsed` below.
+  let now = $state(Date.now());
+  let elapsed = $derived(view.active ? formatElapsed(now - new Date(view.active.start).getTime()) : null);
 
   onMount(async () => {
     try {
@@ -15,10 +21,15 @@
     unlisten = await onStateChanged((updated) => {
       view = updated;
     });
+
+    timerInterval = setInterval(() => {
+      now = Date.now();
+    }, 1000);
   });
 
   onDestroy(() => {
     unlisten?.();
+    clearInterval(timerInterval);
   });
 </script>
 
@@ -29,6 +40,7 @@
 <main>
   {#if view.active}
     <p class="name">{view.active.name}</p>
+    <p class="timer">{elapsed}</p>
     <p class="depth">{view.stack.length > 0 ? `${view.stack.length} deep` : "no interruption"}</p>
   {:else}
     <p class="name empty">No active task</p>
@@ -63,6 +75,12 @@
   .name.empty {
     opacity: 0.6;
     font-weight: 400;
+  }
+  .timer {
+    margin: 0.15rem 0 0;
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.9;
   }
   .depth {
     margin: 0.2rem 0 0;
