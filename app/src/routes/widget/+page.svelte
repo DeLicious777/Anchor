@@ -36,8 +36,11 @@
 <!--
   Display only — no controls. Per the feature doc: "not meant for rapid
   interaction... opened deliberately." Fast interaction is the hotkeys.
+  `data-tauri-drag-region` is what makes the window moveable at all: with
+  `decorations: false` (tauri.conf.json) there's no title bar for the OS to
+  drag by, so without this attribute the window is stuck wherever it opens.
 -->
-<main>
+<main data-tauri-drag-region>
   {#if view.active}
     <p class="name">{view.active.name}</p>
     <p class="timer">{elapsed}</p>
