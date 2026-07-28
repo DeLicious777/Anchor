@@ -8,6 +8,8 @@ related: [docs/vision/vision.md, docs/concept/concept.md, docs/product/users.md,
 # Interruption Stack (Switch / Interrupt / Return)
 
 > Created via `/new-feature interruption-stack`. This is the foundational MVP mechanic — Task Templates and export both depend on the data this produces. Following `.claude/workflows/design.md` in order. Revised after an independent reviewer pass (2026-07-23) — see git history / conversation for what changed and why. Revised again (2026-07-27, see conversation): the Switch/Interrupt hotkeys start tracking immediately instead of focusing a quick-input popup, naming is now optional at start time (auto-assigned, renamed later), and a new Rename capability was added — see Goals, UX, Technical Constraints, and Acceptance Criteria below.
+>
+> **Known gap (2026-07-28), tracked as `docs/risks.md` R9:** this doc's `recovered-gap` correction promise (UX, "Gap-recovery state") is not implemented and cannot be performed today — no transition type edits a completed Time Block's times, and no command exposes one. The design decision below stands; what's missing is the mechanism. It is expected to be resolved together with manual time block entry (`ideas/manual-time-block-entry.md`) under a shared ADR, since both are the same underlying capability. Nothing else in this doc is affected.
 
 ## Problem
 
@@ -73,7 +75,7 @@ Serves the single primary persona in `docs/product/users.md` — the interrupted
 - **Switch/Interrupt hotkeys**: no popup, no focus-stealing — pressing the hotkey performs the transition immediately. If no name was given (see Rename below for the dashboard's manual Switch/Interrupt, which also accepts a blank name), the new Time Block is auto-named `Anchor N` (Technical Constraints).
 - **Rename** (dashboard, "Active" section, visible whenever a task is running): name/project/client fields pre-filled with the active task's current values, editable and savable at any time without affecting the stack or the task's start time. Autocomplete combines Task Templates and distinct past Time Block name/project/client combinations ("history"), each suggestion tagged by source so a template and a same-named past task aren't visually confused.
 - **Return actions**: two distinct hotkeys (Return to Previous, Return to Original) — no prompt needed, since both are unambiguous given the current stack state.
-- **Gap-recovery state**: on relaunch after an ungraceful shutdown, *or* on resume from sleep/hibernate while an entry was active, that entry is marked `recovered-gap` with an inferred end time and surfaced distinctly in the dashboard — never silently folded in as `explicit`. No prompt interrupts the user in the moment (on wake or on relaunch); correction happens whenever the user next opens the dashboard.
+- **Gap-recovery state**: on relaunch after an ungraceful shutdown, *or* on resume from sleep/hibernate while an entry was active, that entry is marked `recovered-gap` with an inferred end time and surfaced distinctly in the dashboard — never silently folded in as `explicit`. No prompt interrupts the user in the moment (on wake or on relaunch); correction happens whenever the user next opens the dashboard. **(Not yet implemented — the correction mechanism this sentence assumes does not exist; see `docs/risks.md` R9 and the note at the top of this doc.)**
 
 ## Technical Constraints
 
