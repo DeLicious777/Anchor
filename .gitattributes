@@ -1,0 +1,8 @@
+# The repository already stores every text file with LF. Git for Windows sets
+# core.autocrlf=true in its system config by default, which rewrites those files
+# to CRLF on checkout and warns on every add — a per-machine setting deciding
+# something that belongs to the repo. Declaring it here makes the working tree
+# match the index for any clone, on any platform.
+#
+# Binary files are excluded automatically by text=auto's content detection.
+* text=auto eol=lf
