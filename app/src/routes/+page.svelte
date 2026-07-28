@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import * as R from "ramda";
-  import { listen } from "@tauri-apps/api/event";
   import {
     switchTask,
     interruptTask,
     returnPrevious,
     returnOriginal,
     completeTask,
+    renameActive,
     getState,
     onStateChanged,
     listTemplates,
@@ -20,15 +20,16 @@
     chooseSaveLocation,
     exportXlsx,
     exportJson,
+    getHotkeyBindings,
+    updateHotkeyBindings,
   } from "$lib/api";
-  import type { StackView, TimeBlock, TaskTemplate, ExportSettings } from "$lib/types";
+  import type { StackView, TimeBlock, TaskTemplate, ExportSettings, HotkeyBindings } from "$lib/types";
   import { formatElapsed } from "$lib/time";
 
   let name = $state("");
   let project = $state("");
   let client = $state("");
   let error = $state<string | null>(null);
-  let nameInput: HTMLInputElement;
 
   let view = $state<StackView>({ active: null, stack: [], closed: [] });
 
@@ -45,12 +46,34 @@
   let customEnd = $state("");
   let exportMessage = $state<string | null>(null);
 
+  let activeTab = $state<"dashboard" | "settings">("dashboard");
+  let hotkeyForm = $state<HotkeyBindings>({
+    switch: "",
+    interrupt: "",
+    return_previous: "",
+    return_original: "",
+    complete: "",
+  });
+  let hotkeyError = $state<string | null>(null);
+  let hotkeySaved = $state(false);
+
+  // Renames the currently active task in place (e.g. giving an auto-named
+  // "Anchor N" task a real name, or retargeting it to an existing template
+  // or past task). Synced from `view.active` whenever the active task's
+  // identity changes (see the $effect below), so opening this always starts
+  // from the task's current values rather than stale leftovers.
+  let renameName = $state("");
+  let renameProject = $state("");
+  let renameClient = $state("");
+  let renameError = $state<string | null>(null);
+  let showRenameSuggestions = $state(false);
+  let syncedActiveId = $state<string | null>(null);
+
   // Ticks once a second purely to re-derive the active-task timer below — never
   // sent anywhere, never persisted, just drives the live elapsed-time display.
   let now = $state(Date.now());
 
   let unlistenState: (() => void) | undefined;
-  let unlistenFocus: (() => void) | undefined;
   let unlistenTemplates: (() => void) | undefined;
   let timerInterval: ReturnType<typeof setInterval> | undefined;
 
@@ -61,11 +84,6 @@
     unlistenState = await onStateChanged((updated) => {
       view = updated;
     });
-    // Fired by the Switch/Interrupt global hotkeys (see lib.rs) — this window
-    // is brought forward and focused there; here we just focus the input.
-    unlistenFocus = await listen("focus-name-input", () => {
-      nameInput?.focus();
-    });
 
     templates = await listTemplates();
     unlistenTemplates = await onTemplatesChanged((updated) => {
@@ -73,6 +91,7 @@
     });
 
     exportSettings = await getExportSettings();
+    hotkeyForm = await getHotkeyBindings();
 
     timerInterval = setInterval(() => {
       now = Date.now();
@@ -81,7 +100,6 @@
 
   onDestroy(() => {
     unlistenState?.();
-    unlistenFocus?.();
     unlistenTemplates?.();
     clearInterval(timerInterval);
   });
@@ -100,14 +118,46 @@
     return trimmed.length === 0 ? null : trimmed;
   }
 
+  // A blank name is allowed here — the backend auto-assigns "Anchor N" when
+  // given one (see `commands::name_or_default`), same as the hotkeys.
   function doSwitch() {
-    if (!name.trim()) return;
     refresh(switchTask(name.trim(), nullable(project), nullable(client)));
   }
 
   function doInterrupt() {
-    if (!name.trim()) return;
     refresh(interruptTask(name.trim(), nullable(project), nullable(client)));
+  }
+
+  // Re-syncs the rename form whenever the active task actually changes
+  // identity (a new Time Block started) — not on every field edit the user
+  // makes to it, and not while nothing is active.
+  $effect(() => {
+    if (view.active && view.active.id !== syncedActiveId) {
+      renameName = view.active.name;
+      renameProject = view.active.project ?? "";
+      renameClient = view.active.client ?? "";
+      renameError = null;
+      syncedActiveId = view.active.id;
+    } else if (!view.active) {
+      syncedActiveId = null;
+    }
+  });
+
+  async function saveRename() {
+    if (!view.active || !renameName.trim()) return;
+    renameError = null;
+    try {
+      view = await renameActive(renameName.trim(), nullable(renameProject), nullable(renameClient));
+    } catch (e) {
+      renameError = String(e);
+    }
+  }
+
+  function selectRenameSuggestion(s: { name: string; project: string | null; client: string | null }) {
+    renameName = s.name;
+    renameProject = s.project ?? "";
+    renameClient = s.client ?? "";
+    showRenameSuggestions = false;
   }
 
   function selectTemplate(t: TaskTemplate) {
@@ -190,6 +240,17 @@
     return { start, end };
   }
 
+  async function saveHotkeys() {
+    hotkeyError = null;
+    hotkeySaved = false;
+    try {
+      hotkeyForm = await updateHotkeyBindings(hotkeyForm);
+      hotkeySaved = true;
+    } catch (e) {
+      hotkeyError = String(e);
+    }
+  }
+
   async function onRoundingChange() {
     error = null;
     try {
@@ -246,6 +307,28 @@
   // Re-derives every second as `now` ticks — the only reason `now` exists.
   let activeElapsed = $derived(view.active ? formatElapsed(now - new Date(view.active.start).getTime()) : null);
 
+  // Distinct (name, project, client) combos actually used in the timeline —
+  // the "past task" half of the rename picker's "Both" sources, alongside
+  // Task Templates. Ramda's uniqBy, not a hand-rolled Set/Map dedup.
+  let historyEntries = $derived(
+    R.uniqBy((b: TimeBlock) => `${b.name} ${b.project ?? ""} ${b.client ?? ""}`, view.closed),
+  );
+
+  // Combined rename suggestions: saved templates and raw task history,
+  // visually tagged by source since they can otherwise look identical (a
+  // template and a past task can share the same name/project/client).
+  let renameSuggestions = $derived(
+    renameName.trim().length === 0
+      ? []
+      : R.take(
+          8,
+          [
+            ...templates.map((t) => ({ name: t.name, project: t.project, client: t.client, source: "template" as const })),
+            ...historyEntries.map((b) => ({ name: b.name, project: b.project, client: b.client, source: "history" as const })),
+          ].filter((s) => s.name.toLowerCase().includes(renameName.trim().toLowerCase())),
+        ),
+  );
+
   // Most-recently-closed first — real use of Ramda, not just an installed-and-unused dependency.
   let closedMostRecentFirst = $derived(R.reverse(R.sortBy((b: TimeBlock) => b.start, view.closed)));
 
@@ -269,17 +352,66 @@
 <main class="container">
   <h1>Anchor — Interruption Stack (debug)</h1>
 
+  <nav class="tabs">
+    <button type="button" class:active={activeTab === "dashboard"} onclick={() => (activeTab = "dashboard")}>
+      Dashboard
+    </button>
+    <button type="button" class:active={activeTab === "settings"} onclick={() => (activeTab = "settings")}>
+      Settings
+    </button>
+  </nav>
+
   {#if error}
     <p class="error">{error}</p>
   {/if}
 
+  {#if activeTab === "settings"}
+    <section>
+      <h2>Hotkeys</h2>
+      {#if hotkeyError}
+        <p class="error">{hotkeyError}</p>
+      {/if}
+      {#if hotkeySaved}
+        <p class="success">Saved — new bindings are live.</p>
+      {/if}
+      <div class="hotkey-row">
+        <label for="hotkey-switch">Switch</label>
+        <input id="hotkey-switch" bind:value={hotkeyForm.switch} oninput={() => (hotkeySaved = false)} />
+      </div>
+      <div class="hotkey-row">
+        <label for="hotkey-interrupt">Interrupt</label>
+        <input id="hotkey-interrupt" bind:value={hotkeyForm.interrupt} oninput={() => (hotkeySaved = false)} />
+      </div>
+      <div class="hotkey-row">
+        <label for="hotkey-return-previous">Return to Previous</label>
+        <input id="hotkey-return-previous" bind:value={hotkeyForm.return_previous} oninput={() => (hotkeySaved = false)} />
+      </div>
+      <div class="hotkey-row">
+        <label for="hotkey-return-original">Return to Original</label>
+        <input id="hotkey-return-original" bind:value={hotkeyForm.return_original} oninput={() => (hotkeySaved = false)} />
+      </div>
+      <div class="hotkey-row">
+        <label for="hotkey-complete">Complete</label>
+        <input id="hotkey-complete" bind:value={hotkeyForm.complete} oninput={() => (hotkeySaved = false)} />
+      </div>
+      <p class="hint">
+        Accelerator format, e.g. <code>Ctrl+Alt+S</code>. All five are applied together — if any one of them can't be
+        registered (invalid format, or already bound to another app), nothing changes and the previous bindings stay
+        active.
+      </p>
+      <div class="row">
+        <button onclick={saveHotkeys}>Save</button>
+      </div>
+    </section>
+  {/if}
+
+  {#if activeTab === "dashboard"}
   <section>
     <h2>New task</h2>
     <div class="row autocomplete">
       <input
         placeholder="Name"
         bind:value={name}
-        bind:this={nameInput}
         onfocus={() => (showSuggestions = true)}
         onblur={() => (showSuggestions = false)}
       />
@@ -377,6 +509,35 @@
       <p><strong>{view.active.name}</strong>{#if view.active.project} · {view.active.project}{/if}{#if view.active.client} · {view.active.client}{/if}</p>
       <p>started {new Date(view.active.start).toLocaleTimeString()}</p>
       <p class="timer">{activeElapsed}</p>
+
+      {#if renameError}
+        <p class="error">{renameError}</p>
+      {/if}
+      <div class="row autocomplete">
+        <input
+          placeholder="Name"
+          bind:value={renameName}
+          onfocus={() => (showRenameSuggestions = true)}
+          onblur={() => (showRenameSuggestions = false)}
+        />
+        <input placeholder="Project (optional)" bind:value={renameProject} />
+        <input placeholder="Client (optional)" bind:value={renameClient} />
+        {#if showRenameSuggestions && renameSuggestions.length > 0}
+          <ul class="suggestions">
+            {#each renameSuggestions as s}
+              <li>
+                <button type="button" onmousedown={() => selectRenameSuggestion(s)}>
+                  {s.name}{#if s.project} · {s.project}{/if}{#if s.client} · {s.client}{/if}
+                  <span class="suggestion-source">{s.source === "template" ? "template" : "history"}</span>
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+      <div class="row">
+        <button onclick={saveRename} disabled={!renameName.trim()}>Rename</button>
+      </div>
     {:else}
       <p>No active task.</p>
     {/if}
@@ -436,6 +597,7 @@
       </ul>
     {/if}
   </section>
+  {/if}
 </main>
 
 <style>
@@ -449,6 +611,42 @@
     margin-bottom: 2rem;
     padding-bottom: 1rem;
     border-bottom: 1px solid #ddd;
+  }
+  .tabs {
+    display: flex;
+    gap: 0.25rem;
+    margin-bottom: 1.5rem;
+    border-bottom: 1px solid #ddd;
+  }
+  .tabs button {
+    padding: 0.5em 1em;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    font-size: 1rem;
+  }
+  .tabs button.active {
+    border-bottom-color: #396cd8;
+    font-weight: 600;
+  }
+  .hotkey-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+  .hotkey-row label {
+    width: 12rem;
+    flex-shrink: 0;
+  }
+  .hotkey-row input {
+    flex: 1;
+    padding: 0.4em 0.6em;
+  }
+  .hint {
+    color: #666;
+    font-size: 0.9rem;
   }
   .row {
     display: flex;
@@ -516,6 +714,11 @@
   }
   .suggestions li button:hover {
     background: #f0f0f0;
+  }
+  .suggestion-source {
+    float: right;
+    color: #999;
+    font-size: 0.8rem;
   }
   .template-list {
     list-style: none;

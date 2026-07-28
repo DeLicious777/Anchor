@@ -47,7 +47,7 @@ Serves the same primary persona as `docs/product/users.md` and `docs/product/fea
 ## UX
 
 - **Dashboard** (`interruption-stack.md`'s existing dashboard window) gains a Task Template management section: create, edit, delete templates (name, optional project, optional client).
-- **Quick-input** (triggered by Switch/Interrupt hotkeys, per `interruption-stack.md`): typing autocompletes against both free text and existing templates; selecting a template pre-fills name/project/client, which the user can still edit before confirming — templates are a starting point, not a lock.
+- **Quick-input** (the dashboard's New Task name/project/client fields, used when clicking the Switch/Interrupt buttons manually — as of `interruption-stack.md`'s 2026-07-27 revision, the Switch/Interrupt *hotkeys* no longer open or focus this UI, they start tracking immediately): typing autocompletes against both free text and existing templates; selecting a template pre-fills name/project/client, which the user can still edit before confirming — templates are a starting point, not a lock.
 - Empty state: dashboard's template section shows "No templates yet" with a create action, when none exist.
 - Two templates may share the same name with different project/client (e.g. "Standup" for two different clients) — autocomplete must show project/client alongside the name so these are visually distinguishable, not just the name alone.
 - No change to the Return-to-Previous/Return-to-Original flows — templates only affect how a *new* Switch/Interrupt is named, not how the stack unwinds.

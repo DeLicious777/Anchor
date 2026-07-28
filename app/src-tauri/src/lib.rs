@@ -2,6 +2,7 @@ pub mod commands;
 pub mod export;
 pub mod export_settings;
 pub mod heartbeat;
+pub mod hotkeys;
 pub mod log;
 pub mod model;
 pub mod paths;
@@ -11,27 +12,13 @@ pub mod stack;
 pub mod state;
 pub mod templates;
 
-use commands::{apply_transition, emit_state_changed};
 use export_settings::ExportSettingsState;
-use model::TransitionPayload;
+use hotkeys::{HotkeyAction, HotkeyState};
 use settings::HotkeyBindings;
 use state::AppState;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use templates::TemplateState;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
-
-#[derive(Clone, Copy, Debug)]
-enum HotkeyAction {
-    Switch,
-    Interrupt,
-    ReturnPrevious,
-    ReturnOriginal,
-    Complete,
-}
-
-/// Which action each successfully-registered shortcut maps to. Populated once
-/// in `.setup()`, read-only afterward — the handler below only reads it.
-struct RegisteredHotkeys(Vec<(Shortcut, HotkeyAction)>);
+use tauri_plugin_global_shortcut::ShortcutState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -44,39 +31,34 @@ pub fn run() {
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
-                    let Some(registered) = app.try_state::<RegisteredHotkeys>() else {
+                    let Some(hotkey_state) = app.try_state::<HotkeyState>() else {
                         return;
                     };
-                    let Some((_, action)) = registered.0.iter().find(|(s, _)| s == shortcut) else {
+                    let Ok(registered) = hotkey_state.registered.lock() else {
                         return;
                     };
+                    let Some(action) = registered.iter().find(|(s, _)| s == shortcut).map(|(_, action)| *action) else {
+                        return;
+                    };
+                    drop(registered);
 
-                    match action {
-                        HotkeyAction::Switch | HotkeyAction::Interrupt => {
-                            // Deliberately not a dedicated quick-input popup this
-                            // slice — bring the dashboard forward with its name
-                            // field focused, reusing the existing form.
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                                let _ = window.emit("focus-name-input", ());
-                            }
-                        }
-                        HotkeyAction::ReturnPrevious | HotkeyAction::ReturnOriginal | HotkeyAction::Complete => {
-                            let Some(state) = app.try_state::<AppState>() else {
-                                return;
-                            };
-                            let payload = match action {
-                                HotkeyAction::ReturnPrevious => TransitionPayload::ReturnPrevious,
-                                HotkeyAction::ReturnOriginal => TransitionPayload::ReturnOriginal,
-                                HotkeyAction::Complete => TransitionPayload::Complete,
-                                HotkeyAction::Switch | HotkeyAction::Interrupt => unreachable!(),
-                            };
-                            match apply_transition(&state, |_| payload.clone()) {
-                                Ok(view) => emit_state_changed(app, &view),
-                                Err(e) => eprintln!("hotkey action failed: {e}"),
-                            }
-                        }
+                    // Delegate straight to the same commands the dashboard
+                    // buttons call — Switch/Interrupt with a blank name auto-
+                    // assigns "Anchor N" (see `commands::name_or_default`), so
+                    // the hotkey now actually starts tracking immediately
+                    // instead of just focusing the dashboard's name field.
+                    // Each command emits `state-changed` itself on success.
+                    let app_handle = app.clone();
+                    let state = app.state::<AppState>();
+                    let result = match action {
+                        HotkeyAction::Switch => commands::switch(app_handle, state, String::new(), None, None),
+                        HotkeyAction::Interrupt => commands::interrupt(app_handle, state, String::new(), None, None),
+                        HotkeyAction::ReturnPrevious => commands::return_previous(app_handle, state),
+                        HotkeyAction::ReturnOriginal => commands::return_original(app_handle, state),
+                        HotkeyAction::Complete => commands::complete(app_handle, state),
+                    };
+                    if let Err(e) = result {
+                        eprintln!("hotkey action failed: {e}");
                     }
                 })
                 .build(),
@@ -106,23 +88,13 @@ pub fn run() {
                 eprintln!("warning: could not persist hotkey settings to {}: {e}", settings_path.display());
             }
 
-            let mut registered = Vec::new();
-            for (accelerator, action) in [
-                (&bindings.switch, HotkeyAction::Switch),
-                (&bindings.interrupt, HotkeyAction::Interrupt),
-                (&bindings.return_previous, HotkeyAction::ReturnPrevious),
-                (&bindings.return_original, HotkeyAction::ReturnOriginal),
-                (&bindings.complete, HotkeyAction::Complete),
-            ] {
-                match accelerator.parse::<Shortcut>() {
-                    Ok(shortcut) => match app.global_shortcut().register(shortcut) {
-                        Ok(()) => registered.push((shortcut, action)),
-                        Err(e) => eprintln!("warning: failed to register hotkey {accelerator:?} ({action:?}): {e}"),
-                    },
-                    Err(e) => eprintln!("warning: invalid hotkey accelerator {accelerator:?}: {e}"),
-                }
+            let (registered, failures) = hotkeys::register_bindings(handle, &bindings);
+            for (action, message) in &failures {
+                eprintln!("warning: failed to register hotkey for {}: {message}", action.label());
             }
-            app.manage(RegisteredHotkeys(registered));
+            let hotkey_state = HotkeyState::new(bindings, settings_path);
+            *hotkey_state.registered.lock().unwrap() = registered;
+            app.manage(hotkey_state);
 
             let templates_path = paths::templates_file_path(handle)?;
             app.manage(TemplateState::init(templates_path));
@@ -141,6 +113,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::switch,
             commands::interrupt,
+            commands::rename_active,
             commands::return_previous,
             commands::return_original,
             commands::complete,
@@ -153,6 +126,8 @@ pub fn run() {
             commands::update_export_settings,
             commands::export_xlsx,
             commands::export_json,
+            commands::get_hotkey_bindings,
+            commands::update_hotkey_bindings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

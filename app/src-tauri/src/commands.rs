@@ -10,7 +10,9 @@
 
 use crate::export;
 use crate::export_settings::{mutate_export_settings, ExportSettings, ExportSettingsState};
+use crate::hotkeys::{apply_remap, HotkeyState};
 use crate::model::{StackFrame, TaskTemplate, TimeBlock, TransitionPayload};
+use crate::settings::HotkeyBindings;
 use crate::stack::InterruptionStack;
 use crate::state::AppState;
 use crate::templates::{mutate_templates, TemplateState};
@@ -77,6 +79,36 @@ pub fn apply_transition(
     Ok(StackView::from(&inner.stack))
 }
 
+/// A UTC instant marking the start of "today" in the host's local timezone —
+/// the boundary `InterruptionStack::next_default_name` counts against, so its
+/// "Anchor N" numbering resets once per real calendar day rather than every
+/// 24 hours from an arbitrary point. Falls back to the current instant on the
+/// (very rare) DST-transition edge case where local midnight is ambiguous or
+/// doesn't exist — at worst under-counts today's auto-named tasks by one,
+/// never a correctness issue for anything durable.
+fn today_start_utc() -> DateTime<Utc> {
+    let local_now = chrono::Local::now();
+    let midnight = local_now.date_naive().and_hms_opt(0, 0, 0).expect("midnight is always a valid time");
+    match midnight.and_local_timezone(chrono::Local) {
+        chrono::LocalResult::Single(dt) => dt.with_timezone(&Utc),
+        chrono::LocalResult::Ambiguous(dt, _) => dt.with_timezone(&Utc),
+        chrono::LocalResult::None => local_now.with_timezone(&Utc),
+    }
+}
+
+/// An empty/whitespace-only name means "start this without naming it" —
+/// covers both the Switch/Interrupt hotkeys (which no longer require typing a
+/// name first) and the dashboard's Switch/Interrupt buttons when clicked with
+/// nothing typed. A real "Anchor N" name is generated and durably logged;
+/// nothing blank ever reaches the log or an export.
+fn name_or_default(name: String, stack: &InterruptionStack) -> String {
+    if name.trim().is_empty() {
+        stack.next_default_name(today_start_utc())
+    } else {
+        name
+    }
+}
+
 #[tauri::command]
 pub fn switch(
     app: AppHandle,
@@ -86,6 +118,7 @@ pub fn switch(
     client: Option<String>,
 ) -> Result<StackView, String> {
     let view = apply_transition(&state, |stack| {
+        let name = name_or_default(name, stack);
         if stack.active.is_none() {
             TransitionPayload::Start { name, project, client }
         } else {
@@ -104,7 +137,28 @@ pub fn interrupt(
     project: Option<String>,
     client: Option<String>,
 ) -> Result<StackView, String> {
-    let view = apply_transition(&state, |_| TransitionPayload::Interrupt { name, project, client })?;
+    let view = apply_transition(&state, |stack| TransitionPayload::Interrupt {
+        name: name_or_default(name, stack),
+        project,
+        client,
+    })?;
+    emit_state_changed(&app, &view);
+    Ok(view)
+}
+
+/// Renames the currently active task in place — no new Time Block, no stack
+/// effect, start time untouched. Lets a task started unnamed (or under an
+/// existing template/past name) be corrected or made more specific while
+/// it's still running.
+#[tauri::command]
+pub fn rename_active(
+    app: AppHandle,
+    state: State<AppState>,
+    name: String,
+    project: Option<String>,
+    client: Option<String>,
+) -> Result<StackView, String> {
+    let view = apply_transition(&state, |_| TransitionPayload::Rename { name, project, client })?;
     emit_state_changed(&app, &view);
     Ok(view)
 }
@@ -247,6 +301,33 @@ pub fn export_json(
     let payload = export::json_export(&blocks, rounding_interval(rounding_enabled, rounding_interval_minutes));
     let json = serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())
+}
+
+/// Reports the last known-good bindings — what's persisted and (barring an
+/// OS-level failure the user hasn't yet been asked to resolve) what's
+/// actually registered. This is what the Settings tab reads to populate its
+/// remap form.
+#[tauri::command]
+pub fn get_hotkey_bindings(state: State<HotkeyState>) -> Result<HotkeyBindings, String> {
+    let bindings = state.bindings.lock().map_err(|_| "hotkey state lock poisoned".to_string())?;
+    Ok(bindings.clone())
+}
+
+/// Atomically remaps all five hotkeys: either all five new accelerators
+/// register and persist, or none of them do and the previous bindings stay
+/// live — see `hotkeys::apply_remap`.
+#[tauri::command]
+pub fn update_hotkey_bindings(
+    app: AppHandle,
+    state: State<HotkeyState>,
+    switch: String,
+    interrupt: String,
+    return_previous: String,
+    return_original: String,
+    complete: String,
+) -> Result<HotkeyBindings, String> {
+    let new_bindings = HotkeyBindings { switch, interrupt, return_previous, return_original, complete };
+    apply_remap(&app, &state, new_bindings)
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
-import type { ExportSettings, StackView, TaskTemplate } from "./types";
+import type { ExportSettings, HotkeyBindings, StackView, TaskTemplate } from "./types";
 
 const STATE_CHANGED_EVENT = "state-changed";
 const TEMPLATES_CHANGED_EVENT = "templates-changed";
@@ -34,6 +34,16 @@ export function returnOriginal(): Promise<StackView> {
 
 export function completeTask(): Promise<StackView> {
   return invoke("complete");
+}
+
+/**
+ * Renames the currently active task in place — no new Time Block, no stack
+ * effect, start time untouched. Used both to give an auto-named ("Anchor N")
+ * task a real name and to retarget it to an existing template/past task
+ * while it's still running.
+ */
+export function renameActive(name: string, project: string | null, client: string | null): Promise<StackView> {
+  return invoke("rename_active", { name, project, client });
 }
 
 export function getState(): Promise<StackView> {
@@ -95,6 +105,26 @@ export function exportJson(
   roundingIntervalMinutes: number,
 ): Promise<void> {
   return invoke("export_json", { path, rangeStart, rangeEnd, roundingEnabled, roundingIntervalMinutes });
+}
+
+export function getHotkeyBindings(): Promise<HotkeyBindings> {
+  return invoke("get_hotkey_bindings");
+}
+
+/**
+ * All five bindings are sent together and applied atomically on the backend
+ * (`hotkeys::apply_remap`) — either every accelerator registers and persists,
+ * or none of them do and the previous bindings stay live. A rejected remap
+ * throws, with a message identifying which action/accelerator failed.
+ */
+export function updateHotkeyBindings(bindings: HotkeyBindings): Promise<HotkeyBindings> {
+  return invoke("update_hotkey_bindings", {
+    switch: bindings.switch,
+    interrupt: bindings.interrupt,
+    returnPrevious: bindings.return_previous,
+    returnOriginal: bindings.return_original,
+    complete: bindings.complete,
+  });
 }
 
 /**

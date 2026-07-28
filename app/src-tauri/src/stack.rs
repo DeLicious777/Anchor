@@ -53,6 +53,27 @@ impl InterruptionStack {
         self.stack.len()
     }
 
+    /// The default name assigned when a task is started without one (the
+    /// Switch/Interrupt hotkeys no longer require typing a name first —
+    /// see `docs/product/features/interruption-stack.md` revision). Numbered
+    /// "Anchor N", counting only Time Blocks already using this convention
+    /// that started at or after `today_start` — so the count resets every day
+    /// without a separate persisted counter, purely from the existing
+    /// timeline. `today_start` (a UTC instant marking local midnight) is
+    /// computed by the caller, keeping this function pure and independent of
+    /// the host's timezone/wall clock for testing.
+    pub fn next_default_name(&self, today_start: DateTime<Utc>) -> String {
+        let max_n = self
+            .closed
+            .iter()
+            .chain(self.active.iter())
+            .filter(|b| b.start >= today_start)
+            .filter_map(|b| b.name.strip_prefix("Anchor ").and_then(|rest| rest.parse::<u32>().ok()))
+            .max()
+            .unwrap_or(0);
+        format!("Anchor {}", max_n + 1)
+    }
+
     /// Apply one transition. The single entry point used by both live commands
     /// and log replay, so the two paths can never disagree about what a
     /// transition means.
@@ -89,6 +110,13 @@ impl InterruptionStack {
                 self.closed.push(current);
                 self.stack.push(frame);
                 self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp));
+                Ok(())
+            }
+            TransitionPayload::Rename { name, project, client } => {
+                let current = self.active.as_mut().ok_or(StackError::NoActiveTask)?;
+                current.name = name.clone();
+                current.project = project.clone();
+                current.client = client.clone();
                 Ok(())
             }
             TransitionPayload::ReturnPrevious => {
@@ -365,5 +393,62 @@ mod tests {
         start(&mut s, "A", 0);
         let err = s.apply(&TransitionPayload::ReturnPrevious, t(10)).unwrap_err();
         assert_eq!(err, StackError::StackEmpty);
+    }
+
+    #[test]
+    fn rename_changes_active_task_fields_without_touching_start_stack_or_closed() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "Anchor 1", 0);
+        s.apply(
+            &TransitionPayload::Rename { name: "Real name".into(), project: Some("Acme".into()), client: None },
+            t(5),
+        )
+        .unwrap();
+
+        let active = s.active.as_ref().unwrap();
+        assert_eq!(active.name, "Real name");
+        assert_eq!(active.project, Some("Acme".to_string()));
+        assert_eq!(active.start, t(0), "rename must not change the start time");
+        assert!(s.closed.is_empty());
+        assert_eq!(s.stack_depth(), 0);
+    }
+
+    #[test]
+    fn rename_requires_an_active_task() {
+        let mut s = InterruptionStack::new();
+        let err = s
+            .apply(&TransitionPayload::Rename { name: "X".into(), project: None, client: None }, t(0))
+            .unwrap_err();
+        assert_eq!(err, StackError::NoActiveTask);
+    }
+
+    #[test]
+    fn next_default_name_starts_at_1_when_nothing_matches_today() {
+        let s = InterruptionStack::new();
+        assert_eq!(s.next_default_name(t(0)), "Anchor 1");
+    }
+
+    #[test]
+    fn next_default_name_increments_past_existing_anchor_names_started_today() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "Anchor 1", 0);
+        s.apply(&TransitionPayload::Switch { name: "Anchor 2".into(), project: None, client: None }, t(10))
+            .unwrap();
+        assert_eq!(s.next_default_name(t(-100)), "Anchor 3");
+    }
+
+    #[test]
+    fn next_default_name_ignores_anchor_names_that_started_before_today() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "Anchor 5", 0);
+        // today_start is after this entry's start — yesterday's count must not carry over.
+        assert_eq!(s.next_default_name(t(50)), "Anchor 1");
+    }
+
+    #[test]
+    fn next_default_name_ignores_non_anchor_names() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "Some real task", 0);
+        assert_eq!(s.next_default_name(t(-10)), "Anchor 1");
     }
 }

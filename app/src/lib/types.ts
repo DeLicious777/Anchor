@@ -34,3 +34,11 @@ export interface ExportSettings {
   rounding_enabled: boolean;
   rounding_interval_minutes: number;
 }
+
+export interface HotkeyBindings {
+  switch: string;
+  interrupt: string;
+  return_previous: string;
+  return_original: string;
+  complete: string;
+}

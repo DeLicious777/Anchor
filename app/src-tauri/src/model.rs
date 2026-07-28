@@ -101,6 +101,12 @@ pub enum TransitionPayload {
     Start { name: String, project: Option<String>, client: Option<String> },
     Switch { name: String, project: Option<String>, client: Option<String> },
     Interrupt { name: String, project: Option<String>, client: Option<String> },
+    /// Changes the currently active Time Block's identity fields in place —
+    /// no new block, no stack effect, start time untouched. Lets a task
+    /// started without a name (see `InterruptionStack::next_default_name`)
+    /// be renamed, or renamed to an existing template/past task name, while
+    /// it's still running.
+    Rename { name: String, project: Option<String>, client: Option<String> },
     ReturnPrevious,
     ReturnOriginal,
     Complete,
