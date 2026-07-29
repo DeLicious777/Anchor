@@ -99,6 +99,24 @@ The UI stays simple by being context-sensitive — Start where nothing is active
 
 **Unaffected.** [ADR 0001](0001-manual-assisted-tracking-for-mvp.md) holds: reconstruction is the user stating what happened, never activity inference. [ADR 0003](0003-billable-classification-out-of-scope.md) is untouched. ADR 0004's format, checksum framing, and compaction triggers are unchanged — only the payload guarantee is added.
 
+## Amendment (2026-07-29): the "no active task" state was already reachable
+
+Recorded as an amendment rather than an edit to Context above, per `CLAUDE.md`'s append-only rule and the precedent ADR 0001 set. Nothing in the Decision changes; its **justification** does, and gets stronger.
+
+**Architectural guarantee, stated explicitly:** `active == None` with a non-empty interruption stack is an **accepted, supported application state**. It may arise from Pause, from crash recovery, or from future workflows. The state machine MUST provide legal transitions out of it without requiring a synthetic task start.
+
+**Why this is an amendment and not a restatement.** The Decision above justified that legality as something *Pause needs*. Checking the claim against the implementation showed the state **already occurs today**: `state.rs`'s `AppState::init` appends `RecoverGap` when replay leaves an entry active, and `RecoverGap` deliberately does not auto-resume — so a crash inside an interruption produces it on the next launch, with frames intact. In that state `ReturnPrevious`, `ReturnOriginal`, `Interrupt` and `Rename` all fail on `NoActiveTask`, and `Complete` fails on `CannotCompleteWithOpenStack`. The only escape is `commands.rs`'s `switch`, which dispatches to `Start` when nothing is active.
+
+So the user must already begin a task they may not be doing in order to unwind orphaned frames — [`principles.md`](../principles.md) #3's failure mode, live in shipped code, not a hazard introduced by Pause.
+
+**Consequences:**
+
+- **The stack-state work is a correctness fix in the core interruption model**, not scaffolding for a feature. It would remain necessary if Pause were removed. Tracked on issue #1 with a regression test: crash inside an interruption, restart, unwind without starting anything.
+- **The `Switch`-as-`Start` overload this ADR rejected already exists.** `switch` branches on `active.is_none()`. Making `Start` first-class is therefore partly an extraction of existing behaviour, not new construction — cheaper than the Decision above implies.
+- **The narrative inverts, usefully:** Pause did not require a new state; Pause *exposed an incomplete state machine.* That is a better foundation, because it does not depend on wanting Pause.
+
+Found by applying [`principles.md`](../principles.md) #8 — verifying an accepted claim against the implementation rather than against the document that asserted it.
+
 ## Open — must be resolved before implementation
 
 This ADR does not decide these. They were identified but never worked through, and recording them as open is more honest than inventing answers:
