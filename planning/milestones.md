@@ -16,7 +16,7 @@ Outcome: a full workday can be tracked end-to-end (Switch/Interrupt/Return, hotk
 
 Outcome: recurring activities are low-friction to track, and a day/range can be exported to XLSX/JSON in a billing-ready form. Both epics depend only on M1, not on each other — can proceed in parallel or either order.
 
-Once M2 ships, the MVP (`docs/product/mvp.md`) is feature-complete per its "In scope" list.
+~~Once M2 ships, the MVP is feature-complete per its "In scope" list.~~ **No longer true (2026-07-28).** The Concept revision added four items to MVP scope — timeline reconstruction, the Timeline Editor, Pause/Continue Session, and the interruption-history panel — none of which has a feature doc or an epic yet. M1 and M2 as scoped below are necessary but no longer sufficient for MVP completeness. A third milestone will be needed; it cannot be defined until those feature docs exist, per `CLAUDE.md`'s gate.
 
 ## Later (not yet epics)
 
