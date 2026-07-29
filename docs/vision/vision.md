@@ -1,13 +1,13 @@
 ---
-status: draft
+status: accepted
 date: 2026-07-28
 owner: erich
-related: [docs/concept/concept.md, docs/product/users.md, docs/product/mvp.md, docs/risks.md, docs/decisions/0001-manual-assisted-tracking-for-mvp.md, docs/decisions/0003-billable-classification-out-of-scope.md]
+related: [docs/concept/concept.md, docs/product/users.md, docs/product/mvp.md, docs/principles.md, docs/risks.md, docs/decisions/0001-manual-assisted-tracking-for-mvp.md, docs/decisions/0003-billable-classification-out-of-scope.md, docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md]
 ---
 
 # Vision
 
-> **Under revision (2026-07-28), was `accepted` since 2026-07-23.** Reverted to `draft` by the Concept revision session that established Anchor as *capture-first, timeline-assisted*. Two success criteria below were absolute in a way the product no longer is — see "Success looks like." Returns to `accepted` only after the Discovery workflow's Stage 5 reviewer pass.
+> **Revised and re-accepted 2026-07-28.** The Concept revision established Anchor as *capture-first, timeline-assisted*. Two success criteria below were absolute in a way the product no longer is and are now measurable — see "Success looks like." Accepted after a `grill-with-docs` session and three independent review passes, each returning fewer findings than the last, plus the author's own read of the full diff. Remaining risk is judged to be normal implementation feedback rather than unresolved design uncertainty; anything implementation uncovers goes through a new ADR or Discovery iteration rather than blocking here.
 
 ## Problem
 

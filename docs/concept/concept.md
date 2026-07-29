@@ -1,13 +1,13 @@
 ---
-status: draft
+status: accepted
 date: 2026-07-28
 owner: erich
-related: [docs/vision/vision.md, docs/product/mvp.md, docs/risks.md, docs/glossary.md, docs/product/features/interruption-stack.md, ideas/manual-time-block-entry.md]
+related: [docs/vision/vision.md, docs/product/mvp.md, docs/principles.md, docs/risks.md, docs/glossary.md, docs/architecture/constraints.md, docs/product/features/interruption-stack.md, docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md, ideas/manual-time-block-entry.md]
 ---
 
 # Concept
 
-> **Under revision (2026-07-28), was `accepted` since 2026-07-23.** The Concept revision session established the product as **capture-first, timeline-assisted**: the interruption model is the product, the timeline is the interface. Returns to `accepted` only after the Discovery workflow's Stage 5 reviewer pass.
+> **Revised and re-accepted 2026-07-28.** The product is **capture-first, timeline-assisted**: the interruption model is the product, the Timeline is the interface. "How it's different" is now a build-vs-buy record rather than a differentiation claim — a tool with one user needs a defensible reason not to install ManicTime, not a market position.
 
 ## Elevator pitch
 

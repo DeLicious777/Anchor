@@ -1,5 +1,5 @@
 ---
-status: draft
+status: accepted
 date: 2026-07-28
 owner: erich
 related: [docs/decisions/0004-transition-log-format-and-torn-write-scheme.md, docs/decisions/0001-manual-assisted-tracking-for-mvp.md, docs/concept/concept.md, docs/vision/vision.md, docs/product/mvp.md, docs/product/features/interruption-stack.md, docs/product/features/export.md, docs/glossary.md, docs/principles.md, docs/risks.md, docs/architecture/constraints.md]
@@ -7,7 +7,9 @@ related: [docs/decisions/0004-transition-log-format-and-torn-write-scheme.md, do
 
 # 0005: Event Model — Time Block Metadata and Reconstruction Transitions
 
-> `status: draft`. The decisions below survived a `grill-with-docs` session (2026-07-28, 14 branches) and an independent reviewer pass, but this ADR document itself has not been reviewed in its final form. It moves to `accepted` together with `vision.md` and `concept.md` after a verification pass.
+> **Accepted 2026-07-28**, together with `vision.md` and `concept.md`. The decisions below came out of a `grill-with-docs` session (14 branches) and survived three independent review passes returning 15, 14, and 12 findings respectively — each round's fixes introduced new problems the next round caught, which is why three ran. Every reported blocker was addressed and the author reviewed the full diff.
+>
+> **Accepted with nine open items** (below). That is deliberate: they are implementation-level decisions — ordering, overlap rules, wire formats — that need code in hand to settle well, not design uncertainty about the model. **They must be resolved before implementation begins**, per the process gate in `CLAUDE.md`. Anything implementation uncovers that contradicts this ADR gets a new ADR, not an edit to this one.
 
 ## Context
 
