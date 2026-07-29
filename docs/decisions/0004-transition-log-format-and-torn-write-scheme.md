@@ -2,10 +2,15 @@
 status: accepted
 date: 2026-07-24
 owner: erich
-related: [docs/product/features/interruption-stack.md, docs/decisions/0002-desktop-app-framework-and-platform.md, docs/risks.md, docs/architecture/constraints.md, docs/glossary.md]
+related: [docs/product/features/interruption-stack.md, docs/decisions/0002-desktop-app-framework-and-platform.md, docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md, docs/risks.md, docs/architecture/constraints.md, docs/glossary.md]
 ---
 
 # 0004: Transition Log Format, Torn-Write Detection, and Compaction
+
+> **Amended by [ADR 0005](0005-event-model-time-block-metadata-and-reconstruction-transitions.md) (2026-07-28).** This ADR's decisions stand — format, checksum framing, torn-write handling, and compaction triggers are unchanged. Two things were added or altered on top of it, recorded here so a reader of this doc alone is not misled:
+>
+> 1. **The "stable on-disk contract" below is broken, deliberately and once.** ADR 0005 splits `completion_reason` into three fields and moves `auto-completed-on-skip` out of the enum — not a backward-compatible addition. Accepted because the contract currently protects exactly one log file, belonging to the author, on an unreleased tool: a replay shim or a discarded dev log, not a migration strategy for a userbase that does not exist.
+> 2. **This ADR never specified the snapshot's *payload*, only its mechanism.** ADR 0005 adds the missing guarantee: the snapshot MUST persist unresolved interruption stack frames, not merely closed Time Blocks. That guarantee is load-bearing — it is the sole reason `InterruptionOutcome` has no persisted `Pending` value.
 
 ## Context
 

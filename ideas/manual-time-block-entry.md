@@ -36,6 +36,15 @@ This is a direct mitigation for **R3** (med-high likelihood, high impact — "no
 - How is the new block named — inline entry, the same template/history autocomplete used for Rename, or the `Anchor N` auto-name fallback?
 - Precision: what does a drag snap to (1/5/15 minutes)? Interacts with export's rounding interval.
 
+## Promoted to MVP scope (2026-07-28)
+
+The Concept revision (`docs/concept/concept.md`) made the timeline a **reconstruction workspace** and moved this into `docs/product/mvp.md`. Two things changed for this idea:
+
+1. **It is no longer optional or deferred** — it's the mechanism behind `docs/vision/vision.md`'s revised "minimal manual effort, entirely inside Anchor" criterion, and it subsumes the `recovered-gap` correction path (R9).
+2. ~~**The edit surface is larger than recorded above** — add, edit, remove, move, resize, **split, and merge**.~~ **Superseded the same day.** The `grill-with-docs` session **removed split and merge** for lacking problem statements. The MVP edit surface is exactly five operations: **add, move, resize, edit identity, delete** — see [ADR 0005](../docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md) and `docs/principles.md` #1. Merge turned out to duplicate what export already does (grouping and summing equivalent work) while adding adjacency rules, `duration ≠ end − start`, and provenance laundering on two axes; split was reachable via resize plus add. Struck through rather than deleted because the laundering concern it raised is what led to the three-field model.
+
+One boundary is now fixed: **every block always represents work that actually happened.** No future-dated or intended blocks — planning was explicitly rejected as belonging in a calendar or task manager.
+
 ## Gate
 
-This one should **not** be treated as a UI idea. It needs a full Design pass and almost certainly its own ADR (new transition type, ordering, overlap rules) before any implementation — see `.claude/workflows/design.md` and the process gate in `CLAUDE.md`.
+This one should **not** be treated as a UI idea. It needs a full Design pass and its own ADR (new transition type carrying explicit start and end, log-order vs. chronological-order, overlap rules, split/merge semantics) before any implementation — see `.claude/workflows/design.md` and the process gate in `CLAUDE.md`. Being in MVP scope raises its priority; it does not skip the gate.

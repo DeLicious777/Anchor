@@ -9,16 +9,18 @@ related: [docs/vision/vision.md, docs/concept/concept.md, docs/product/mvp.md, d
 
 > Created via `/new-feature export`. Depends on `docs/product/features/interruption-stack.md` (Time Block model, dashboard) and `docs/product/features/task-templates.md` (canonical naming). Following `.claude/workflows/design.md`.
 
+> **Pending revision (2026-07-28) — [ADR 0005](../../decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md).** This doc's JSON shape carries `completion_reason` per record (rounding off). That field is being split into three — `EndDetermination`, `CaptureOrigin`, `InterruptionOutcome`. **Decided (ADR 0005):** full-fidelity JSON (rounding off) carries all three plus the `DerivedInterruptionStatus` projection, because `docs/vision/vision.md` requires Capture Rate to be computable from exported data and this is the only artifact that can carry it. Each export mode now has one job: **grouped output is intentionally lossy and billing-oriented; full-fidelity output is the analysis artifact.** Nothing else here changes: grouped output (XLSX, and JSON with rounding on) carries no per-block metadata today and still won't, and none of the three fields may ever become an aggregation key — that would silently change billed totals. Deliberately not rewritten inline: the JSON shape is an accepted acceptance criterion and changing it needs its own pass, not an edit made in passing.
+
 ## Problem
 
-At the end of a day (or occasionally a longer range), the author needs the tracked timeline turned into billing-usable output without hand-editing — per `docs/vision/vision.md`'s "exporting to XLSX/JSON produces data the author would actually trust and use for billing, without hand-editing." A real workday produces many short, fragmented Time Blocks per task (interruptions split a task's tracked time into several pieces across the day) — exporting these raw fragments directly isn't billing-usable without consolidation and rounding to a standard billing increment, which is exactly the "manual reconciliation" this project exists to eliminate.
+At the end of a day (or occasionally a longer range), the author needs the tracked timeline turned into billing-usable output without post-processing it elsewhere — per `docs/vision/vision.md`'s "produces data the author would actually trust and use for billing **without post-processing in Excel or any other external tool**" (citation updated 2026-07-28; the criterion previously read "without hand-editing," which the reconstruction workspace made false as written — editing inside Anchor is now intended, editing *outside* it is what this feature prevents). A real workday produces many short, fragmented Time Blocks per task (interruptions split a task's tracked time into several pieces across the day) — exporting these raw fragments directly isn't billing-usable without consolidation and rounding to a standard billing increment, which is exactly the "manual reconciliation" this project exists to eliminate.
 
 ## Goals
 
 - Picking a date range (defaulting to the common case — today) and exporting produces a single flat XLSX worksheet, one row per unique task in that range, combined and rounded — ready to bill from without further editing in Excel.
 - JSON export is available from the same underlying data, independently controllable for rounding, for future integrations/tooling that need more granular fidelity than the billing-oriented XLSX view.
 - The underlying stored timeline (`docs/product/features/interruption-stack.md`) is never modified by export — grouping and rounding are read-only, export-time transformations, always computed fresh from the exact stored data.
-- Ties to `docs/vision/vision.md` "no manual reconciliation" and to closing the practical gap in R2 (`docs/risks.md`) that Task Templates only partially addressed.
+- Ties to `docs/vision/vision.md`'s "minimal manual effort, entirely inside Anchor" (revised 2026-07-28) and to closing the practical gap in R2 (`docs/risks.md`) that Task Templates only partially addressed.
 
 ## Users
 

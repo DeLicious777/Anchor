@@ -8,6 +8,7 @@ Living documentation for the project — kept in sync with every decision, not w
 - `product/features/` — one doc per feature, copied from [`_template.md`](product/features/_template.md) via `/new-feature` (frontmatter)
 - [`architecture/overview.md`](architecture/overview.md), [`architecture/constraints.md`](architecture/constraints.md) — current-state architecture and non-negotiables
 - `decisions/` — ADRs, sequential and append-only, copied from [`0000-adr-template.md`](decisions/0000-adr-template.md) via `/new-adr` (frontmatter)
+- [`principles.md`](principles.md) — design principles derived from decisions actually made; the lens for evaluating new ones (frontmatter: no)
 - [`assumptions.md`](assumptions.md) — running log of assumptions, revisited as confirmed or invalidated
 - [`risks.md`](risks.md) — risk register (frontmatter)
 - [`roadmap.md`](roadmap.md) — milestones and sequencing

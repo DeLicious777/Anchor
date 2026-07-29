@@ -61,4 +61,6 @@ Fix must-fix findings concretely — edit the actual docs, populate `docs/risks.
 
 ## Exit criteria
 
-Vision, Concept, and MVP are `status: accepted` (Target Users is current, per its log-doc nature — no separate accept step), internally consistent with each other, and have survived an independent reviewer pass whose must-fix findings were actually resolved, not just acknowledged.
+Vision and Concept are `status: accepted`; MVP Scope and Target Users are **current and consistent** with them, per their log-doc nature — no separate accept step. All are internally consistent with each other and have survived an independent reviewer pass whose must-fix findings were actually resolved, not just acknowledged.
+
+_(Corrected 2026-07-28: this previously required `docs/product/mvp.md` to be `status: accepted`, which it cannot be — `.claude/docs-standards.md` deliberately scopes frontmatter to ADRs, Vision, Concept, feature docs, and Risks, so `mvp.md` has none. The criterion was unsatisfiable as written and blocked the exit it was meant to certify. Fixed in the workflow rather than by giving `mvp.md` frontmatter, so the docs-standards rule stays intact and `mvp.md` gets the same treatment `users.md` already had.)_

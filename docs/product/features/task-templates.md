@@ -17,7 +17,7 @@ Recurring activities (a daily standup, a sprint retro, ongoing work for a specif
 
 - Starting a recurring activity takes one selection (template) instead of manually typing name/project/client each time.
 - Templates reduce *entry-time* drift (typos, inconsistent naming) for a recurring activity's name/project/client, partially mitigating R2's aggregation-fragmentation risk (`docs/risks.md`) going forward. This is a partial mitigation, not a resolution: editing a template later still doesn't retroactively update already-recorded Time Blocks (see Technical Constraints), so template renames can still reproduce the same fragmentation R2 describes.
-- Ties to `docs/vision/vision.md` "Success looks like": lower-friction capture supports "no manual reconciliation" by reducing a source of inconsistent data entry.
+- Ties to `docs/vision/vision.md` "Success looks like": lower-friction capture supports "minimal manual effort, entirely inside Anchor" (revised 2026-07-28) by reducing a source of inconsistent data entry.
 
 ## Users
 

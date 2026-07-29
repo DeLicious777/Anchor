@@ -11,7 +11,7 @@ Anchor is a Tauri desktop application: a Rust core process handling OS-level con
 ## Component map
 
 - **Rust core (Tauri backend)**: OS bridges (global hotkey registration via `tauri-plugin-global-shortcut`, tray, window management, sleep/hibernate detection via raw Windows API calls), the transition log's read/write/checksum/compaction logic, and the 60-second heartbeat timer.
-- **Svelte/TypeScript frontend**: the always-on-top mini widget (current task, stack depth) and the dashboard (timeline view, Task Template management, export), both reading from the same backend state via IPC — no divergent in-memory caches.
+- **Svelte/TypeScript frontend**: the always-on-top mini widget (current task, stack depth) and the dashboard (the Timeline — presented as the Timeline Editor and the History View — plus Task Template management and export), both reading from the same backend state via IPC — no divergent in-memory caches. Terminology updated 2026-07-28: "timeline view" was ambiguous across three referents, see `docs/glossary.md`.
 - **Persisted state (on disk)**: an append-only JSON Lines transition log (one file per user), periodically compacted into a snapshot + truncated log, both keyed by a monotonic per-line sequence number for crash-safe watermark-based replay.
 - **No external services**: no calendar integration, no cloud sync, no accounts — everything is local to the single Windows machine for MVP.
 
