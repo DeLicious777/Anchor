@@ -56,6 +56,14 @@ The failure mode is not choosing a number without evidence — it is choosing on
 
 **Applied:** [`vision.md`](vision/vision.md)'s Capture Rate (≥90%) and Capture Latency (≤1s) targets.
 
+## 8. Verify a claim against documentation *and* implementation before it becomes load-bearing
+
+Not "keep the docs in sync" — that treats the failure as drift, and it usually isn't. Sometimes the documentation was wrong, sometimes the implementation was ahead of it, sometimes both were incomplete while a decision was being made on top of them. The common cause is that nothing establishes which source is authoritative before something depends on it. This holds even before code exists: the claim is then checked against a documented architectural decision instead.
+
+**Found six instances in one session (2026-07-28), only because someone went looking:** an `accepted` doc promising `recovered-gap` correction with no mechanism (R9); `explicit` documented as "user-finished" while the code wrote it at six sites for four meanings; Switch's stack behaviour undocumented while a Vision promise depended on it; ADR 0004 specifying compaction's mechanism but never its payload; compaction unimplemented while several docs reasoned about what survives it — and, most expensively, **Pause decided as "Complete + Start" when the code rejects `Complete` with a non-empty stack.** That decision was made *wrongly* because nobody checked.
+
+Tracked as risk **R11**, whose candidate mitigation is this principle applied as a gate: before any design document reaches `accepted`, every implementation-dependent claim in it is verified. Note R11 does not close when any single instance is fixed.
+
 ---
 
 **Keeping this current:** a principle earns a place here only once it has rejected or admitted something concrete. If a principle has never changed a decision, it is a slogan — remove it. If a decision contradicts a principle, one of the two is wrong; resolve it rather than letting both stand.
