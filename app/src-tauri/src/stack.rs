@@ -14,6 +14,19 @@
 //! - Return to Original resolves every skipped frame as `auto-completed-on-skip`,
 //!   and the root frame it lands on as `explicit` (it was directly engaged with,
 //!   same as Return to Previous's target).
+//!
+//! Legal-state contract (ADR 0005 amendment, 2026-07-29):
+//! - `active == None` with a NON-EMPTY stack is a supported state, not an error.
+//!   It is already reachable today: `state::AppState::init` appends `RecoverGap`
+//!   when replay leaves an entry active, and `RecoverGap` deliberately does not
+//!   auto-resume — so a crash inside an interruption produces it on next launch,
+//!   frames intact. It will also arise from Pause once that is built.
+//! - Both Return operations MUST therefore work with nothing active. Previously
+//!   they demanded an active task, so the only escape from that state was
+//!   `commands::switch` silently acting as `Start` — forcing the user to begin a
+//!   task they may not have been doing in order to unwind orphaned frames. That
+//!   is `docs/principles.md` #3's failure mode ("the state model must never force
+//!   users to create inaccurate records simply to satisfy the software").
 
 use crate::model::{CompletionReason, StackFrame, TimeBlock, TransitionPayload};
 use chrono::{DateTime, Utc};
@@ -120,11 +133,12 @@ impl InterruptionStack {
                 Ok(())
             }
             TransitionPayload::ReturnPrevious => {
-                let mut current = self.active.take().ok_or(StackError::NoActiveTask)?;
+                // Pop BEFORE touching `active`: a StackEmpty error must not leave
+                // a half-applied mutation behind. (Live commands dry-run on a
+                // clone, so this was never live corruption — but `log::reader`
+                // calls `apply` directly, with no such guard.)
                 let frame = self.stack.pop().ok_or(StackError::StackEmpty)?;
-                current.end = Some(timestamp);
-                current.completion_reason = Some(CompletionReason::Explicit);
-                self.closed.push(current);
+                self.close_active_if_any(timestamp, CompletionReason::Explicit);
 
                 self.resolve_paused(frame.paused_time_block_id, CompletionReason::Explicit)?;
                 self.active = Some(TimeBlock::new(frame.name, frame.project, frame.client, timestamp));
@@ -134,10 +148,7 @@ impl InterruptionStack {
                 if self.stack.is_empty() {
                     return Err(StackError::StackEmpty);
                 }
-                let mut current = self.active.take().ok_or(StackError::NoActiveTask)?;
-                current.end = Some(timestamp);
-                current.completion_reason = Some(CompletionReason::Explicit);
-                self.closed.push(current);
+                self.close_active_if_any(timestamp, CompletionReason::Explicit);
 
                 // Pop every frame down to (but not including) the root, marking
                 // each skipped one auto-completed-on-skip.
@@ -178,6 +189,22 @@ impl InterruptionStack {
                 self.closed.push(current);
                 Ok(())
             }
+        }
+    }
+
+    /// Close the active Time Block if there is one, otherwise do nothing.
+    ///
+    /// The "otherwise do nothing" is the point: `active == None` with a
+    /// non-empty stack is a legal state (see module docs), so a Return must
+    /// resolve its frame from that state rather than demanding a synthetic task
+    /// start first. Infallible by construction — there is no failure mode in
+    /// "close it if it exists" — which is what lets the Return arms stay
+    /// straight-line.
+    fn close_active_if_any(&mut self, timestamp: DateTime<Utc>, reason: CompletionReason) {
+        if let Some(mut current) = self.active.take() {
+            current.end = Some(timestamp);
+            current.completion_reason = Some(reason);
+            self.closed.push(current);
         }
     }
 
@@ -225,6 +252,98 @@ mod tests {
                 t(at),
             )
             .unwrap();
+    }
+
+    /// Reproduces the exact state a crash inside an interruption leaves behind:
+    /// `state::AppState::init` appends `RecoverGap` when replay finds something
+    /// active, and `RecoverGap` deliberately does not auto-resume.
+    fn crashed_mid_interruption() -> InterruptionStack {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "A", 0);
+        interrupt(&mut s, "B", 10);
+        s.apply(&TransitionPayload::RecoverGap { inferred_end: t(15) }, t(20)).unwrap();
+
+        assert!(s.active.is_none(), "gap recovery must not auto-resume");
+        assert_eq!(s.stack_depth(), 1, "A's frame survives the crash");
+        s
+    }
+
+    /// Regression: before ADR 0005's amendment, EVERY transition from this state
+    /// was illegal — Return*/Interrupt/Rename on `NoActiveTask`, Complete on
+    /// `CannotCompleteWithOpenStack` — so the only escape was `commands::switch`
+    /// silently acting as `Start`, forcing the user to begin a task they may not
+    /// have been doing just to unwind orphaned frames (`principles.md` #3).
+    #[test]
+    fn return_previous_unwinds_after_crash_recovery_without_starting_a_task() {
+        let mut s = crashed_mid_interruption();
+        let a_id = s.closed[0].id;
+
+        s.apply(&TransitionPayload::ReturnPrevious, t(30)).unwrap();
+
+        assert_eq!(s.stack_depth(), 0, "the orphaned frame is resolved");
+        assert_eq!(s.active.as_ref().unwrap().name, "A", "resumed without a synthetic Start");
+        assert_eq!(
+            s.closed.iter().find(|b| b.id == a_id).unwrap().completion_reason,
+            Some(CompletionReason::Explicit),
+            "the returned-to frame resolves explicitly, exactly as with an active task"
+        );
+        assert_eq!(
+            s.closed.len(),
+            2,
+            "nothing extra is closed — there was no active block to close"
+        );
+    }
+
+    #[test]
+    fn return_original_unwinds_after_crash_recovery_without_starting_a_task() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "A", 0);
+        interrupt(&mut s, "B", 10);
+        interrupt(&mut s, "C", 20);
+        s.apply(&TransitionPayload::RecoverGap { inferred_end: t(25) }, t(30)).unwrap();
+        assert!(s.active.is_none());
+        assert_eq!(s.stack_depth(), 2);
+
+        let a_id = s.closed[0].id;
+        let b_id = s.closed[1].id;
+
+        s.apply(&TransitionPayload::ReturnOriginal, t(40)).unwrap();
+
+        assert_eq!(s.stack_depth(), 0);
+        assert_eq!(s.active.as_ref().unwrap().name, "A");
+        assert_eq!(
+            s.closed.iter().find(|b| b.id == b_id).unwrap().completion_reason,
+            Some(CompletionReason::AutoCompletedOnSkip),
+            "skipped frames stay distinguishable even when nothing was active"
+        );
+        assert_eq!(
+            s.closed.iter().find(|b| b.id == a_id).unwrap().completion_reason,
+            Some(CompletionReason::Explicit)
+        );
+    }
+
+    /// `Complete` is deliberately still rejected here — that hole is Pause's to
+    /// close, not this fix's. Pinned so the two changes stay distinguishable.
+    #[test]
+    fn complete_is_still_rejected_after_crash_recovery_with_an_open_stack() {
+        let mut s = crashed_mid_interruption();
+        assert_eq!(
+            s.apply(&TransitionPayload::Complete, t(30)),
+            Err(StackError::CannotCompleteWithOpenStack)
+        );
+    }
+
+    /// A failed Return must not consume the active block. Live commands dry-run
+    /// on a clone so this was never observable there, but `log::reader` calls
+    /// `apply` directly with no such guard.
+    #[test]
+    fn return_previous_on_empty_stack_leaves_the_active_block_intact() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "A", 0);
+
+        assert_eq!(s.apply(&TransitionPayload::ReturnPrevious, t(10)), Err(StackError::StackEmpty));
+        assert_eq!(s.active.as_ref().unwrap().name, "A", "the active block survives the rejection");
+        assert!(s.closed.is_empty());
     }
 
     #[test]
