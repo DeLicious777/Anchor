@@ -144,7 +144,7 @@ pub fn write_xlsx(rows: &[ExportRow], path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CompletionReason;
+    use crate::model::EndDetermination;
     use std::sync::LazyLock;
 
     static BASE: LazyLock<DateTime<Utc>> = LazyLock::new(Utc::now);
@@ -156,7 +156,7 @@ mod tests {
     fn closed_block(name: &str, project: Option<&str>, start_offset: i64, duration_secs: i64) -> TimeBlock {
         let mut b = TimeBlock::new(name.into(), project.map(String::from), None, t(start_offset));
         b.end = Some(t(start_offset + duration_secs));
-        b.completion_reason = Some(CompletionReason::Explicit);
+        b.end_determination = Some(EndDetermination::UserDetermined);
         b
     }
 

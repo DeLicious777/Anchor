@@ -28,10 +28,11 @@ pub struct Inner {
 pub struct InitReport {
     pub torn_line_discarded: bool,
     /// True if replay left an active entry (the process stopped running — for
-    /// any reason — while something was active) and it was closed as
-    /// `recovered-gap`. Deliberately does NOT auto-resume: see `stack.rs`'s
-    /// `RecoverGap` docs for why a restart and a live sleep/wake are handled
-    /// differently.
+    /// any reason — while something was active) and it was closed with an
+    /// inferred end (`EndDetermination::SystemInferred`). Deliberately does NOT
+    /// auto-resume — and since 2026-07-29 the live sleep/wake path does not
+    /// either (ADR 0005 open item 9): wake and crash are the same class of
+    /// event, so they resolve identically.
     pub startup_gap_recovered: bool,
 }
 
@@ -85,7 +86,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CompletionReason;
+    use crate::model::EndDetermination;
 
     #[test]
     fn leftover_active_entry_is_closed_as_recovered_gap_with_no_auto_resume() {
@@ -110,12 +111,13 @@ mod tests {
         let inner = state.inner.lock().unwrap();
         assert!(inner.stack.active.is_none(), "startup recovery must not auto-resume");
         let b = inner.stack.closed.iter().find(|b| b.name == "B").unwrap();
-        assert_eq!(b.completion_reason, Some(CompletionReason::RecoveredGap));
+        assert_eq!(b.end_determination, Some(EndDetermination::SystemInferred));
         assert!(b.end.is_some());
         // "A" (paused on the stack) is untouched by startup recovery — it's not
         // the active entry, so it stays pending until explicitly resumed.
         let a = inner.stack.closed.iter().find(|b| b.name == "A").unwrap();
-        assert_eq!(a.completion_reason, None);
+        assert_eq!(a.end_determination, Some(EndDetermination::UserDetermined), "A was closed by the Interrupt, not by the gap");
+        assert_eq!(a.interruption_outcome, None, "never resolved — its frame was still open at the crash");
         assert_eq!(inner.stack.stack_depth(), 1);
     }
 

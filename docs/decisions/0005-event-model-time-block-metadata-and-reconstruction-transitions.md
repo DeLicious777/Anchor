@@ -117,6 +117,31 @@ So the user must already begin a task they may not be doing in order to unwind o
 
 Found by applying [`principles.md`](../principles.md) #8 — verifying an accepted claim against the implementation rather than against the document that asserted it.
 
+## Amendment (2026-07-29): the metadata split is not an on-disk change
+
+**This ADR made two claims about the three-field migration that are false.** Both were caught by checking against the implementation before doing the work ([`principles.md`](../principles.md) #8), and both made the change look far more expensive than it is.
+
+**Claim 1 — "Breaking change, taken deliberately now."** The Consequences section says moving `auto-completed-on-skip` out of the enum "is not additive, against an ADR 0004 contract meant to be stable." **It isn't against that contract at all.** `completion_reason` never reached the log. `TransitionRecord` carries `seq`, `timestamp`, and a `TransitionPayload` — nothing else — and `TimeBlock` appears nowhere in the `log` module. ADR 0004's own doc comment says so explicitly: *"resolved state (which blocks close, which frames get pushed/popped) is derived by the state machine itself, not duplicated into the log."*
+
+The metadata is **pure derived state**, recomputed by `InterruptionStack::apply` on every replay. It is serialised in exactly two places, both write-only: the JSON export, and the IPC payload to the frontend. Neither is ever read back.
+
+**Claim 2 — open item 5's "replay shim for existing `auto-completed-on-skip` lines."** There are no such lines, and never were. No shim was needed or written.
+
+**What this changes.** The migration required no on-disk migration, no compatibility window, and no reason to hurry it while the userbase is one person. ADR 0004's stable-contract guarantee is untouched by it and remains fully intact. The one place this *would* have bitten is the snapshot, which does serialise resolved state — but compaction is unimplemented, so no snapshot exists to migrate. Whoever builds it (#8) will serialise whatever the model is then.
+
+**Kept rather than corrected in place**, per the append-only rule: the original Consequences text stands, and this records that its cost assessment was overstated. The decision it justified was right anyway — for reasons of model clarity, not migration economics.
+
+**Resolution of open item 5**, now that it is a pure model question:
+
+| Field | Wire values (kebab-case) |
+|---|---|
+| `EndDetermination` | `user-determined`, `system-inferred` |
+| `CaptureOrigin` | `live-capture`, `live-capture-adjusted`, `manual-entry`, `manual-entry-adjusted` |
+| `InterruptionOutcome` | `resumed`, `skipped` (absent when never interrupted *or* unresolved) |
+| `DerivedInterruptionStatus` | `never-interrupted`, `pending`, `resumed`, `skipped` — projection only, never persisted |
+
+`CaptureOrigin` is a flat four-variant enum rather than nested origin/adjusted fields, so the serialised form stays a single string; `origin()` and `is_adjusted()` recover the axes, and `adjusted()` is idempotent and never rewrites origin.
+
 ## Resolution of open item 9 (2026-07-29): wake stops auto-starting
 
 **Decision: on sleep/wake, `power.rs` emits `RecoverGap` and nothing else.** The active entry is closed with an inferred end; no new Time Block is started. The user resumes deliberately, via the capture action.
@@ -144,7 +169,7 @@ This ADR does not decide these. They were identified but never worked through, a
 2. **Overlap rules.** What happens when an added or resized block overlaps an existing one — reject, truncate the neighbour, or permit? Export sums durations per task, so permitting overlap silently inflates billed totals.
 3. **Editing blocks bound to live stack frames.** Deleting or resizing a block whose task is currently on the stack, or dragging the active block's start, has no defined effect on replay.
 4. **`Rename` versus edit identity.** `Rename` is defined as acting on the *currently active* block and is rejected otherwise (`interruption-stack.md`). Editing a historical block's name/project/client either extends that or creates a second naming path.
-5. **Exact enum value names and serialised forms** for all three fields, including the kebab-case wire representation and the replay shim for existing `auto-completed-on-skip` lines.
+5. ~~**Exact enum value names and serialised forms** for all three fields, including the kebab-case wire representation and the replay shim for existing `auto-completed-on-skip` lines.~~ **Resolved 2026-07-29 — and this item's premise was wrong.** See "Amendment: the metadata split is not an on-disk change" below.
 6. ~~What rounding-off JSON export emits in place of `completion_reason`.~~ **Decided 2026-07-28** (moved out of open items): full-fidelity JSON carries **the three persisted fields**, and deliberately **not** `DerivedInterruptionStatus`. The projection is computed against the *current* interruption stack, so embedding it would make an export of last Tuesday produce different values depending on when it was run — unacceptable in the artifact that has to be reproducible for billing and analysis. It is a **display-surface** projection (History View, Timeline Editor, diagnostics); exports carry raw facts. Capture Rate needs only `CaptureOrigin` and is unaffected. This also resolves the apparent conflict with the glossary's "no view may read `InterruptionOutcome` directly": that rule governs surfaces that *display interruption state*, not an export serialising stored fields. Rationale — `docs/vision/vision.md` requires Capture Rate to be *computable*, and this is the only specified artifact that can carry the per-block metadata to compute it; adding an in-app analytics view was explicitly rejected as expanding MVP surface to validate the product rather than serve the user. Each export mode now has one job: **grouped output is intentionally lossy and billing-oriented; full-fidelity output is the analysis artifact.** Hard constraint unchanged: **no field here may become an aggregation key**, or export totals change silently (see R2). Remaining detail for implementation: exact key names and nesting.
 7. **Two `export.md` defects with no other owner**, inherited here so they are not lost: (a) its Technical Constraints still describe "the underlying stored timeline (the append-only log...)" — the log/timeline conflation the source-of-truth correction existed to remove, and it cites ADR 0002 rather than 0004; (b) its acceptance criterion that the stored timeline is *"unchanged, byte-for-byte, after any export"* is **false whenever a task is active**, since the 60-second heartbeat appends to that file during the export. The existing test passes only because no heartbeat timer runs in it. The criterion needs restating as "no export writes to the timeline," which is what it meant.
 8. **Restating `interruption-stack.md`'s acceptance criteria** against the new fields.

@@ -2,15 +2,124 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// How a Time Block's boundary was determined. `None` on a `TimeBlock` means the
-/// block was closed by an Interrupt but its fate (explicit return vs. skipped) is
-/// not yet decided — see `docs/product/features/interruption-stack.md`.
+/// **How was this block's end time established?** — and nothing else.
+///
+/// Replaced `CompletionReason` (ADR 0005, migrated 2026-07-29), which conflated
+/// three independent questions. The clearest symptom was
+/// `auto-completed-on-skip`: it described the fate of a *stack frame*, not a
+/// reason a block ended. `explicit` was equally muddled — it was documented as
+/// "user-finished" while the code wrote it for Switch-ended and Return-ended
+/// blocks too, which were user-*ended*, not user-*finished*.
+///
+/// Under this field, `Switch` closing a block as `UserDetermined` is simply
+/// correct: the user's own action fixed the moment. Only inference differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum CompletionReason {
-    Explicit,
-    AutoCompletedOnSkip,
-    RecoveredGap,
+pub enum EndDetermination {
+    /// The user's action fixed the end moment — Complete, Switch, Interrupt, or
+    /// either Return. Exact.
+    UserDetermined,
+    /// Anchor inferred it after a detected gap (crash, or sleep/hibernate),
+    /// accurate to roughly the heartbeat interval. Was `recovered-gap`.
+    SystemInferred,
+}
+
+/// **How did this block enter the system, and how much do we trust it?**
+///
+/// Two axes in one wire value: where the block came from, and whether it has
+/// since been adjusted. Kept as a flat enum rather than nested fields so the
+/// serialised form stays a single string, with `origin()`/`is_adjusted()`
+/// recovering the axes.
+///
+/// Origin survives adjustment deliberately. A manually entered block that later
+/// got a one-second nudge must stay distinguishable from a live capture that
+/// needed correcting — collapsing both to "adjusted" would lose the more
+/// important signal. See `docs/vision/vision.md`'s Capture Rate, which counts
+/// live-captured minutes *including* adjusted ones, precisely so the metric
+/// measures capture discipline rather than editing habits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureOrigin {
+    /// Captured as the work happened, never since modified.
+    LiveCapture,
+    /// Captured live, then edited or confirmed by the user.
+    LiveCaptureAdjusted,
+    /// Reconstructed after the fact; never existed as a live capture.
+    ManualEntry,
+    /// Reconstructed after the fact, then further edited.
+    ManualEntryAdjusted,
+}
+
+/// Where a block came from, ignoring whether it was later adjusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureSource {
+    Live,
+    Manual,
+}
+
+impl CaptureOrigin {
+    pub fn origin(self) -> CaptureSource {
+        match self {
+            Self::LiveCapture | Self::LiveCaptureAdjusted => CaptureSource::Live,
+            Self::ManualEntry | Self::ManualEntryAdjusted => CaptureSource::Manual,
+        }
+    }
+
+    pub fn is_adjusted(self) -> bool {
+        matches!(self, Self::LiveCaptureAdjusted | Self::ManualEntryAdjusted)
+    }
+
+    /// Idempotent: adjusting an already-adjusted block changes nothing, and
+    /// adjustment never rewrites origin.
+    pub fn adjusted(self) -> Self {
+        match self {
+            Self::LiveCapture | Self::LiveCaptureAdjusted => Self::LiveCaptureAdjusted,
+            Self::ManualEntry | Self::ManualEntryAdjusted => Self::ManualEntryAdjusted,
+        }
+    }
+}
+
+/// **What ultimately happened to this interrupted work?**
+///
+/// Absorbs the old `auto-completed-on-skip`. Deliberately has no `Pending`
+/// variant: an unresolved obligation is represented by the stack frame itself,
+/// which the snapshot persists (ADR 0005). Persist stable facts, derive
+/// transient process state.
+///
+/// Consequence: an absent value is genuinely ambiguous — *never interrupted* or
+/// *interrupted and not yet resolved*. **No view may read this field directly**;
+/// use `InterruptionStack::derived_status`, which disambiguates against the
+/// live stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InterruptionOutcome {
+    /// The user returned to this work.
+    Resumed,
+    /// Interrupted and never resumed — whether by jumping past it via Return to
+    /// Original Task, or by explicitly dismissing its frame. Same domain fact,
+    /// different route (`docs/principles.md` #6).
+    Skipped,
+}
+
+/// The canonical, **non-persisted** projection every consumer must use to
+/// display interruption state — History View, Timeline Editor, diagnostics.
+///
+/// Exists because `InterruptionOutcome`'s absence is ambiguous on its own, and
+/// no UI or export may invent its own interpretation of it. Computed by
+/// `InterruptionStack::derived_status` from the block plus the *current* stack.
+///
+/// Deliberately NOT included in exports: it is computed against live state, so
+/// embedding it would make an export of last Tuesday yield different values
+/// depending on when it ran — unacceptable in an artifact that has to be
+/// reproducible for billing (ADR 0005 open item 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DerivedInterruptionStatus {
+    NeverInterrupted,
+    /// Interrupted, obligation still open — its frame is on the stack.
+    Pending,
+    Resumed,
+    Skipped,
 }
 
 /// The atomic tracked-work record. Independent flat entry — no persistent link to
@@ -24,7 +133,13 @@ pub struct TimeBlock {
     pub client: Option<String>,
     pub start: DateTime<Utc>,
     pub end: Option<DateTime<Utc>>,
-    pub completion_reason: Option<CompletionReason>,
+    /// `None` while the block is still active — an end time that hasn't
+    /// happened yet has no determination.
+    pub end_determination: Option<EndDetermination>,
+    pub capture_origin: CaptureOrigin,
+    /// `None` means *never interrupted* OR *interrupted and unresolved* — read
+    /// via `InterruptionStack::derived_status`, never directly.
+    pub interruption_outcome: Option<InterruptionOutcome>,
 }
 
 impl TimeBlock {
@@ -36,7 +151,13 @@ impl TimeBlock {
             client,
             start,
             end: None,
-            completion_reason: None,
+            // Every block the state machine creates is captured live, by
+            // definition — it is being created as the work happens. Manual
+            // entry is the exception path (timeline reconstruction, #15), and
+            // will construct blocks that say so.
+            capture_origin: CaptureOrigin::LiveCapture,
+            end_determination: None,
+            interruption_outcome: None,
         }
     }
 

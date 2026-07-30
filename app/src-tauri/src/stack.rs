@@ -5,15 +5,16 @@
 //! Confirmed semantics (see conversation, 2026-07-24):
 //! - Interrupting a task closes its Time Block IMMEDIATELY (end = now), giving it
 //!   an accurate duration that never includes time spent on whatever interrupted
-//!   it. Its `completion_reason` stays pending (`None`) until its fate is decided.
+//!   it. Its END is user-determined at that moment; its INTERRUPTION OUTCOME
+//!   stays pending until it is returned to, skipped, or dismissed.
 //! - Resuming a paused task (via either Return operation) never reopens the
 //!   original Time Block — it starts a brand-new one. Each pause/resume cycle is
 //!   an independent, flat entry (per the accepted Concept: "each block counts as
 //!   an independent entry, aggregated at export time").
-//! - Return to Previous resolves exactly the frame it pops as `explicit`.
-//! - Return to Original resolves every skipped frame as `auto-completed-on-skip`,
-//!   and the root frame it lands on as `explicit` (it was directly engaged with,
-//!   same as Return to Previous's target).
+//! - Return to Previous resolves exactly the frame it pops as `Resumed`.
+//! - Return to Original resolves every skipped frame as `Skipped`, and the root
+//!   frame it lands on as `Resumed` (it was directly engaged with, same as
+//!   Return to Previous's target).
 //!
 //! Legal-state contract (ADR 0005 amendment, 2026-07-29):
 //! - `active == None` with a NON-EMPTY stack is a supported state, not an error.
@@ -28,7 +29,9 @@
 //!   is `docs/principles.md` #3's failure mode ("the state model must never force
 //!   users to create inaccurate records simply to satisfy the software").
 
-use crate::model::{CompletionReason, StackFrame, TimeBlock, TransitionPayload};
+use crate::model::{
+    DerivedInterruptionStatus, EndDetermination, InterruptionOutcome, StackFrame, TimeBlock, TransitionPayload,
+};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 use uuid::Uuid;
@@ -52,8 +55,8 @@ pub struct InterruptionStack {
     pub active: Option<TimeBlock>,
     pub stack: Vec<StackFrame>,
     /// Every Time Block that is no longer active, in the order it closed.
-    /// A `completion_reason` of `None` means "closed by an Interrupt, fate not
-    /// yet decided" — see module docs.
+    /// An `interruption_outcome` of `None` is ambiguous on its own (never
+    /// interrupted vs. interrupted-and-unresolved) — use `derived_status`.
     pub closed: Vec<TimeBlock>,
 }
 
@@ -102,7 +105,7 @@ impl InterruptionStack {
             TransitionPayload::Switch { name, project, client } => {
                 let mut current = self.active.take().ok_or(StackError::NoActiveTask)?;
                 current.end = Some(timestamp);
-                current.completion_reason = Some(CompletionReason::Explicit);
+                current.end_determination = Some(EndDetermination::UserDetermined);
                 self.closed.push(current);
                 self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp));
                 Ok(())
@@ -110,7 +113,13 @@ impl InterruptionStack {
             TransitionPayload::Interrupt { name, project, client } => {
                 let mut current = self.active.take().ok_or(StackError::NoActiveTask)?;
                 current.end = Some(timestamp);
-                // completion_reason stays None: pending, resolved on Return.
+                // The interrupt fixed this block's end moment, so its END is
+                // user-determined like any other. What stays pending is its
+                // INTERRUPTION OUTCOME — resolved on Return, or on dismissal.
+                // Splitting those apart is the whole point of ADR 0005: the old
+                // single field left this block indistinguishable from one that
+                // was never interrupted.
+                current.end_determination = Some(EndDetermination::UserDetermined);
                 let paused_id = current.id;
                 // The frame must carry the PAUSED task's identity (what to
                 // resume later), not the incoming interrupting task's identity.
@@ -138,9 +147,9 @@ impl InterruptionStack {
                 // clone, so this was never live corruption — but `log::reader`
                 // calls `apply` directly, with no such guard.)
                 let frame = self.stack.pop().ok_or(StackError::StackEmpty)?;
-                self.close_active_if_any(timestamp, CompletionReason::Explicit);
+                self.close_active_if_any(timestamp);
 
-                self.resolve_paused(frame.paused_time_block_id, CompletionReason::Explicit)?;
+                self.resolve_paused(frame.paused_time_block_id, InterruptionOutcome::Resumed)?;
                 self.active = Some(TimeBlock::new(frame.name, frame.project, frame.client, timestamp));
                 Ok(())
             }
@@ -148,18 +157,18 @@ impl InterruptionStack {
                 if self.stack.is_empty() {
                     return Err(StackError::StackEmpty);
                 }
-                self.close_active_if_any(timestamp, CompletionReason::Explicit);
+                self.close_active_if_any(timestamp);
 
                 // Pop every frame down to (but not including) the root, marking
                 // each skipped one auto-completed-on-skip.
                 while self.stack.len() > 1 {
                     let skipped = self.stack.pop().expect("len > 1 checked above");
-                    self.resolve_paused(skipped.paused_time_block_id, CompletionReason::AutoCompletedOnSkip)?;
+                    self.resolve_paused(skipped.paused_time_block_id, InterruptionOutcome::Skipped)?;
                 }
                 // The root frame is directly engaged with — explicit, same as
                 // Return to Previous's target.
                 let root = self.stack.pop().expect("stack was non-empty");
-                self.resolve_paused(root.paused_time_block_id, CompletionReason::Explicit)?;
+                self.resolve_paused(root.paused_time_block_id, InterruptionOutcome::Resumed)?;
                 self.active = Some(TimeBlock::new(root.name, root.project, root.client, timestamp));
                 Ok(())
             }
@@ -169,7 +178,7 @@ impl InterruptionStack {
                 }
                 let mut current = self.active.take().ok_or(StackError::NoActiveTask)?;
                 current.end = Some(timestamp);
-                current.completion_reason = Some(CompletionReason::Explicit);
+                current.end_determination = Some(EndDetermination::UserDetermined);
                 self.closed.push(current);
                 Ok(())
             }
@@ -185,7 +194,7 @@ impl InterruptionStack {
                 // resume: yes, via a separate Start transition), not baked in here.
                 let mut current = self.active.take().ok_or(StackError::NoActiveTask)?;
                 current.end = Some(*inferred_end);
-                current.completion_reason = Some(CompletionReason::RecoveredGap);
+                current.end_determination = Some(EndDetermination::SystemInferred);
                 self.closed.push(current);
                 Ok(())
             }
@@ -200,22 +209,37 @@ impl InterruptionStack {
     /// start first. Infallible by construction — there is no failure mode in
     /// "close it if it exists" — which is what lets the Return arms stay
     /// straight-line.
-    fn close_active_if_any(&mut self, timestamp: DateTime<Utc>, reason: CompletionReason) {
+    fn close_active_if_any(&mut self, timestamp: DateTime<Utc>) {
         if let Some(mut current) = self.active.take() {
             current.end = Some(timestamp);
-            current.completion_reason = Some(reason);
+            current.end_determination = Some(EndDetermination::UserDetermined);
             self.closed.push(current);
         }
     }
 
-    fn resolve_paused(&mut self, id: Uuid, reason: CompletionReason) -> Result<(), StackError> {
+    /// The canonical interruption status for a block — the ONE interpretation
+    /// every consumer must use (ADR 0005). Reading `interruption_outcome`
+    /// directly is a bug: absent means *never interrupted* OR *interrupted and
+    /// unresolved*, and only the live stack tells those apart.
+    pub fn derived_status(&self, block: &TimeBlock) -> DerivedInterruptionStatus {
+        match block.interruption_outcome {
+            Some(InterruptionOutcome::Resumed) => DerivedInterruptionStatus::Resumed,
+            Some(InterruptionOutcome::Skipped) => DerivedInterruptionStatus::Skipped,
+            None if self.stack.iter().any(|f| f.paused_time_block_id == block.id) => {
+                DerivedInterruptionStatus::Pending
+            }
+            None => DerivedInterruptionStatus::NeverInterrupted,
+        }
+    }
+
+    fn resolve_paused(&mut self, id: Uuid, outcome: InterruptionOutcome) -> Result<(), StackError> {
         let block = self
             .closed
             .iter_mut()
             .rev()
             .find(|b| b.id == id)
             .ok_or(StackError::PausedBlockNotFound(id))?;
-        block.completion_reason = Some(reason);
+        block.interruption_outcome = Some(outcome);
         Ok(())
     }
 }
@@ -223,6 +247,9 @@ impl InterruptionStack {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests exercise these two — the state machine itself never
+    // constructs anything but a live capture.
+    use crate::model::{CaptureOrigin, CaptureSource};
     use chrono::Duration;
     use std::sync::LazyLock;
 
@@ -254,6 +281,72 @@ mod tests {
             .unwrap();
     }
 
+    /// The whole point of `derived_status`: an absent `interruption_outcome`
+    /// means two different things, and only the live stack distinguishes them.
+    /// A block read in isolation cannot tell "never interrupted" from
+    /// "interrupted, still pending" — which is exactly the confusion the old
+    /// single `completion_reason` field allowed, and which R1's audit trail
+    /// depends on preventing.
+    #[test]
+    fn derived_status_distinguishes_pending_from_never_interrupted() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "A", 0);
+        s.apply(&TransitionPayload::Switch { name: "B".into(), project: None, client: None }, t(10))
+            .unwrap();
+        interrupt(&mut s, "C", 20);
+
+        // A: switched away from, never interrupted. B: interrupted by C, still
+        // pending. Both carry `interruption_outcome: None`.
+        let a = s.closed.iter().find(|b| b.name == "A").unwrap();
+        let b = s.closed.iter().find(|b| b.name == "B").unwrap();
+        assert_eq!(a.interruption_outcome, None);
+        assert_eq!(b.interruption_outcome, None, "identical in the persisted field");
+
+        assert_eq!(s.derived_status(a), DerivedInterruptionStatus::NeverInterrupted);
+        assert_eq!(s.derived_status(b), DerivedInterruptionStatus::Pending, "its frame is still on the stack");
+    }
+
+    #[test]
+    fn derived_status_reports_resolved_outcomes() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "A", 0);
+        interrupt(&mut s, "B", 10);
+        interrupt(&mut s, "C", 20);
+        s.apply(&TransitionPayload::ReturnOriginal, t(30)).unwrap();
+
+        let a = s.closed.iter().find(|b| b.name == "A").unwrap();
+        let b = s.closed.iter().find(|b| b.name == "B").unwrap();
+        assert_eq!(s.derived_status(a), DerivedInterruptionStatus::Resumed);
+        assert_eq!(s.derived_status(b), DerivedInterruptionStatus::Skipped);
+    }
+
+    /// Every block the state machine creates is live-captured by definition —
+    /// it is created as the work happens. Manual entry (#15) is the exception
+    /// path and does not exist yet, so Capture Rate is trivially 100% today.
+    /// That is the correct answer, not a placeholder.
+    #[test]
+    fn state_machine_only_ever_produces_live_captured_blocks() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "A", 0);
+        interrupt(&mut s, "B", 10);
+        s.apply(&TransitionPayload::RecoverGap { inferred_end: t(15) }, t(20)).unwrap();
+
+        assert!(s.closed.iter().all(|b| b.capture_origin == CaptureOrigin::LiveCapture));
+        assert!(s.closed.iter().all(|b| !b.capture_origin.is_adjusted()));
+    }
+
+    #[test]
+    fn capture_origin_adjustment_preserves_source_and_is_idempotent() {
+        assert_eq!(CaptureOrigin::LiveCapture.adjusted(), CaptureOrigin::LiveCaptureAdjusted);
+        assert_eq!(CaptureOrigin::ManualEntry.adjusted(), CaptureOrigin::ManualEntryAdjusted);
+        // Adjusting twice must not change anything further.
+        assert_eq!(CaptureOrigin::LiveCaptureAdjusted.adjusted(), CaptureOrigin::LiveCaptureAdjusted);
+        // Origin survives adjustment — a manually entered block nudged by one
+        // second must never become indistinguishable from a live capture.
+        assert_eq!(CaptureOrigin::ManualEntryAdjusted.origin(), CaptureSource::Manual);
+        assert_eq!(CaptureOrigin::LiveCaptureAdjusted.origin(), CaptureSource::Live);
+    }
+
     /// Reproduces the exact state a crash inside an interruption leaves behind:
     /// `state::AppState::init` appends `RecoverGap` when replay finds something
     /// active, and `RecoverGap` deliberately does not auto-resume.
@@ -283,8 +376,8 @@ mod tests {
         assert_eq!(s.stack_depth(), 0, "the orphaned frame is resolved");
         assert_eq!(s.active.as_ref().unwrap().name, "A", "resumed without a synthetic Start");
         assert_eq!(
-            s.closed.iter().find(|b| b.id == a_id).unwrap().completion_reason,
-            Some(CompletionReason::Explicit),
+            s.closed.iter().find(|b| b.id == a_id).unwrap().interruption_outcome,
+            Some(InterruptionOutcome::Resumed),
             "the returned-to frame resolves explicitly, exactly as with an active task"
         );
         assert_eq!(
@@ -312,13 +405,13 @@ mod tests {
         assert_eq!(s.stack_depth(), 0);
         assert_eq!(s.active.as_ref().unwrap().name, "A");
         assert_eq!(
-            s.closed.iter().find(|b| b.id == b_id).unwrap().completion_reason,
-            Some(CompletionReason::AutoCompletedOnSkip),
+            s.closed.iter().find(|b| b.id == b_id).unwrap().interruption_outcome,
+            Some(InterruptionOutcome::Skipped),
             "skipped frames stay distinguishable even when nothing was active"
         );
         assert_eq!(
-            s.closed.iter().find(|b| b.id == a_id).unwrap().completion_reason,
-            Some(CompletionReason::Explicit)
+            s.closed.iter().find(|b| b.id == a_id).unwrap().interruption_outcome,
+            Some(InterruptionOutcome::Resumed)
         );
     }
 
@@ -359,7 +452,7 @@ mod tests {
         assert_eq!(s.stack_depth(), 0);
         assert_eq!(s.closed.len(), 1);
         assert_eq!(s.closed[0].name, "A");
-        assert_eq!(s.closed[0].completion_reason, Some(CompletionReason::Explicit));
+        assert_eq!(s.closed[0].end_determination, Some(EndDetermination::UserDetermined));
         assert_eq!(s.closed[0].end, Some(t(10)));
         assert_eq!(s.active.as_ref().unwrap().name, "B");
     }
@@ -374,7 +467,8 @@ mod tests {
         assert_eq!(s.closed.len(), 1);
         assert_eq!(s.closed[0].name, "A");
         assert_eq!(s.closed[0].end, Some(t(10)), "A's duration must not include time spent on B");
-        assert_eq!(s.closed[0].completion_reason, None, "fate pending until returned to or skipped");
+        assert_eq!(s.closed[0].interruption_outcome, None, "outcome pending until returned to or skipped");
+        assert_eq!(s.closed[0].end_determination, Some(EndDetermination::UserDetermined), "the interrupt still fixed its end");
         assert_eq!(s.active.as_ref().unwrap().name, "B");
     }
 
@@ -391,9 +485,9 @@ mod tests {
         // B closed explicitly, A resolved explicitly, new "A" block created (not reopened).
         assert_eq!(s.closed.len(), 2);
         assert_eq!(s.closed[1].name, "B");
-        assert_eq!(s.closed[1].completion_reason, Some(CompletionReason::Explicit));
+        assert_eq!(s.closed[1].end_determination, Some(EndDetermination::UserDetermined));
         let resolved_a = s.closed.iter().find(|b| b.id == a_id).unwrap();
-        assert_eq!(resolved_a.completion_reason, Some(CompletionReason::Explicit));
+        assert_eq!(resolved_a.interruption_outcome, Some(InterruptionOutcome::Resumed));
 
         let new_active = s.active.as_ref().unwrap();
         assert_eq!(new_active.name, "A");
@@ -415,8 +509,8 @@ mod tests {
         assert_eq!(s.stack_depth(), 0);
         let resolved_a = s.closed.iter().find(|b| b.id == a_id).unwrap();
         let resolved_b = s.closed.iter().find(|b| b.id == b_id).unwrap();
-        assert_eq!(resolved_a.completion_reason, Some(CompletionReason::Explicit), "root is directly engaged with, never auto-completed");
-        assert_eq!(resolved_b.completion_reason, Some(CompletionReason::AutoCompletedOnSkip), "B was skipped, never explicit");
+        assert_eq!(resolved_a.interruption_outcome, Some(InterruptionOutcome::Resumed), "root is directly engaged with, never skipped");
+        assert_eq!(resolved_b.interruption_outcome, Some(InterruptionOutcome::Skipped), "B was skipped, never resumed");
 
         let new_active = s.active.as_ref().unwrap();
         assert_eq!(new_active.name, "A");
@@ -434,7 +528,7 @@ mod tests {
         assert_eq!(s.closed.len(), 1);
         assert_eq!(s.closed[0].name, "A");
         assert_eq!(s.closed[0].end, Some(inferred_end), "end must be the inferred time, not the moment the gap was detected");
-        assert_eq!(s.closed[0].completion_reason, Some(CompletionReason::RecoveredGap));
+        assert_eq!(s.closed[0].end_determination, Some(EndDetermination::SystemInferred));
         assert!(s.active.is_none(), "RecoverGap must not auto-resume — that decision belongs to the caller");
     }
 
@@ -472,7 +566,7 @@ mod tests {
         }
         assert_eq!(s.stack_depth(), 0);
         // Every paused block resolved explicit — none were skipped via Return to Original.
-        assert!(s.closed.iter().all(|b| b.completion_reason == Some(CompletionReason::Explicit)));
+        assert!(s.closed.iter().all(|b| b.end_determination == Some(EndDetermination::UserDetermined)));
     }
 
     #[test]
@@ -491,7 +585,7 @@ mod tests {
         let skipped_count = s
             .closed
             .iter()
-            .filter(|b| b.completion_reason == Some(CompletionReason::AutoCompletedOnSkip))
+            .filter(|b| b.interruption_outcome == Some(InterruptionOutcome::Skipped))
             .count();
         assert_eq!(skipped_count, 11, "task-1..task-11 skipped; task-12 (the closing active) and root are explicit");
     }

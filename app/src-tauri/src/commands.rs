@@ -11,7 +11,7 @@
 use crate::export;
 use crate::export_settings::{mutate_export_settings, ExportSettings, ExportSettingsState};
 use crate::hotkeys::{apply_remap, HotkeyState};
-use crate::model::{StackFrame, TaskTemplate, TimeBlock, TransitionPayload};
+use crate::model::{DerivedInterruptionStatus, StackFrame, TaskTemplate, TimeBlock, TransitionPayload};
 use crate::settings::HotkeyBindings;
 use crate::stack::InterruptionStack;
 use crate::state::AppState;
@@ -27,16 +27,42 @@ use uuid::Uuid;
 /// mini widget and dashboard agree within milliseconds, by construction.
 pub const STATE_CHANGED_EVENT: &str = "state-changed";
 
+/// A closed Time Block as the UI sees it: the block, plus its canonical
+/// `DerivedInterruptionStatus`.
+///
+/// The status is attached HERE rather than left for the frontend to compute,
+/// because ADR 0005 makes that projection mandatory and singular — an absent
+/// `interruption_outcome` means *never interrupted* OR *interrupted and
+/// unresolved*, and only the live stack tells them apart. Shipping the answer
+/// removes any opportunity for a view to invent its own.
+#[derive(Debug, Serialize, Clone)]
+pub struct ClosedBlockView {
+    #[serde(flatten)]
+    pub block: TimeBlock,
+    pub derived_interruption_status: DerivedInterruptionStatus,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct StackView {
     pub active: Option<TimeBlock>,
     pub stack: Vec<StackFrame>,
-    pub closed: Vec<TimeBlock>,
+    pub closed: Vec<ClosedBlockView>,
 }
 
 impl From<&InterruptionStack> for StackView {
     fn from(s: &InterruptionStack) -> Self {
-        StackView { active: s.active.clone(), stack: s.stack.clone(), closed: s.closed.clone() }
+        StackView {
+            active: s.active.clone(),
+            stack: s.stack.clone(),
+            closed: s
+                .closed
+                .iter()
+                .map(|block| ClosedBlockView {
+                    derived_interruption_status: s.derived_status(block),
+                    block: block.clone(),
+                })
+                .collect(),
+        }
     }
 }
 
@@ -48,9 +74,11 @@ pub fn emit_state_changed(app: &AppHandle, view: &StackView) {
 }
 
 /// The single entry point every mutating command goes through. `build_payload`
-/// receives a read-only view of the current stack so callers like `switch` can
-/// decide their exact transition type (Start vs. Switch) under the same lock
-/// that will perform the write — no separate peek-then-act race.
+/// receives a read-only view of the current stack so callers can derive payload
+/// details from it under the same lock that performs the write — `name_or_default`
+/// needs it to compute the next "Anchor N". It is NOT for choosing between
+/// transition types: `switch` used to pick Start-vs-Switch here, which ADR 0005
+/// rejected. That choice now lives in the presentation layer.
 ///
 /// Deliberately takes no `AppHandle` — this stays fully unit-testable without a
 /// running Tauri app. Callers that have a handle (the `#[tauri::command]`
@@ -510,12 +538,21 @@ mod tests {
         // independent flat entries, aggregated by name/project/client, not ID).
         // What must match is everything that actually carries meaning.
         for (pre, post) in pre_drop_view.closed.iter().zip(post_restart_view.closed.iter()) {
-            assert_eq!(pre.name, post.name);
-            assert_eq!(pre.project, post.project);
-            assert_eq!(pre.client, post.client);
-            assert_eq!(pre.start, post.start);
-            assert_eq!(pre.completion_reason, post.completion_reason);
-            assert_eq!(pre.end, post.end);
+            assert_eq!(pre.block.name, post.block.name);
+            assert_eq!(pre.block.project, post.block.project);
+            assert_eq!(pre.block.client, post.block.client);
+            assert_eq!(pre.block.start, post.block.start);
+            assert_eq!(pre.block.end, post.block.end);
+            // All three metadata fields must survive replay identically — they
+            // are derived by the state machine, never read back from the log,
+            // so this is what proves the derivation is deterministic.
+            assert_eq!(pre.block.end_determination, post.block.end_determination);
+            assert_eq!(pre.block.capture_origin, post.block.capture_origin);
+            assert_eq!(pre.block.interruption_outcome, post.block.interruption_outcome);
+            assert_eq!(
+                pre.derived_interruption_status, post.derived_interruption_status,
+                "the canonical projection must agree across a restart too"
+            );
         }
     }
 
@@ -543,7 +580,7 @@ mod tests {
         let inner = restarted.inner.lock().unwrap();
         assert!(inner.stack.active.is_none());
         let a = inner.stack.closed.iter().find(|b| b.name == "A").unwrap();
-        assert_eq!(a.completion_reason, Some(crate::model::CompletionReason::RecoveredGap));
+        assert_eq!(a.end_determination, Some(crate::model::EndDetermination::SystemInferred));
     }
 
     #[test]

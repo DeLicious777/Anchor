@@ -148,7 +148,7 @@ mod tests {
         assert_eq!(result.stack.stack_depth(), 1);
         assert_eq!(result.stack.active.as_ref().unwrap().name, "B");
         assert_eq!(result.stack.closed[0].name, "A");
-        assert_eq!(result.stack.closed[0].completion_reason, None);
+        assert_eq!(result.stack.closed[0].interruption_outcome, None, "outcome unresolved: its frame is still open");
     }
 
     /// The deliberately-corrupted-line test required by the implementation plan:

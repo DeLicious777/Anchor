@@ -575,7 +575,7 @@
     {:else}
       <table>
         <thead>
-          <tr><th>Name</th><th>Project</th><th>Client</th><th>Duration</th><th>Completion reason</th></tr>
+          <tr><th>Name</th><th>Project</th><th>Client</th><th>Duration</th><th>End time</th><th>Capture</th><th>Interruption</th></tr>
         </thead>
         <tbody>
           {#each closedMostRecentFirst as block}
@@ -584,7 +584,15 @@
               <td>{block.project ?? ""}</td>
               <td>{block.client ?? ""}</td>
               <td>{durationLabel(block)}</td>
-              <td>{block.completion_reason ?? "(pending)"}</td>
+              <!-- Inferred ends must stay visually distinct from user-determined
+                   ones — never silently folded together (interruption-stack.md). -->
+              <td class:inferred={block.end_determination === "system-inferred"}>
+                {block.end_determination === "system-inferred" ? "inferred" : "exact"}
+              </td>
+              <td>{block.capture_origin}</td>
+              <!-- The backend's canonical projection, never `interruption_outcome`
+                   directly: absent is ambiguous, and no view may reinterpret it. -->
+              <td>{block.derived_interruption_status}</td>
             </tr>
           {/each}
         </tbody>
@@ -680,6 +688,14 @@
     text-align: left;
     padding: 0.3em 0.6em;
     border-bottom: 1px solid #eee;
+  }
+  /* An inferred end time is accurate only to roughly the heartbeat interval,
+     and `interruption-stack.md` requires it be surfaced distinctly rather than
+     folded in with user-determined ends. Deliberately not colour-only — the
+     italic carries the same signal without depending on colour perception. */
+  td.inferred {
+    font-style: italic;
+    color: #8a6d00;
   }
   .error {
     color: #b00020;
