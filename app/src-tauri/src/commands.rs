@@ -671,7 +671,7 @@ mod tests {
     /// call write on it" but an actual byte-for-byte comparison of the log
     /// file before and after.
     #[test]
-    fn exporting_leaves_the_underlying_transition_log_byte_for_byte_unchanged() {
+    fn export_writes_nothing_to_the_log_when_no_other_writer_is_active() {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("log.jsonl");
 
@@ -710,8 +710,149 @@ mod tests {
         std::fs::write(&json_path, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
 
         let after = std::fs::read(&log_path).unwrap();
-        assert_eq!(before, after, "exporting must never mutate the durable transition log");
+        // Byte equality is a legitimate assertion *here* and only here: nothing
+        // is active, so no heartbeat is due, and this test is the quiescent
+        // case. It is NOT the architectural invariant — see the companion test
+        // below, which holds while a legitimate concurrent writer is running.
+        assert_eq!(before, after, "with no other writer active, an export must leave the log untouched");
         assert!(xlsx_path.exists());
         assert!(json_path.exists());
+    }
+
+    /// The architectural invariant, stated in `docs/product/features/export.md`:
+    /// **export itself performs no writes**. The test above proves only the
+    /// quiescent case — it passes partly because nothing else was writing.
+    ///
+    /// This one runs a real concurrent writer on the heartbeat's exact append
+    /// path (`apply_transition` with a `Heartbeat` payload, the same call
+    /// `heartbeat::run` makes) throughout an export, and proves write
+    /// *ownership*: the log may legitimately grow, but every added record must
+    /// be attributable to the heartbeat and none to the export.
+    ///
+    /// **What this does not cover:** the heartbeat's 60-second timer. The real
+    /// `heartbeat::run` needs a `tauri::AppHandle`, unavailable in a unit test,
+    /// and waiting on a real interval would make this slow and timing-fragile.
+    /// The timer decision is already covered by `heartbeat::tests`. What is
+    /// exercised here is the part that matters for this invariant — a second
+    /// thread appending to the same log, through the same lock, while export
+    /// runs.
+    ///
+    /// **Determinism:** no sleeps and no timing assertions. The writer thread
+    /// counts its own successful appends, and the assertion is an exact
+    /// equality against that count — so it holds whether the thread manages one
+    /// heartbeat or a thousand. A channel handshake guarantees at least one
+    /// heartbeat has landed *before* the export starts, so the test cannot
+    /// silently degenerate into the quiescent case.
+    #[test]
+    fn export_writes_nothing_to_the_log_while_the_heartbeat_is_appending() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{mpsc, Arc};
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("log.jsonl");
+
+        let (app_state, _report) = AppState::init(&log_path).unwrap();
+        let app_state = Arc::new(app_state);
+
+        // Something must be active for a heartbeat to be due at all
+        // (`heartbeat::should_beat`), so this mirrors the real precondition.
+        apply_transition(&app_state, |_| TransitionPayload::Start {
+            name: "A".into(),
+            project: Some("Acme".into()),
+            client: None,
+        })
+        .unwrap();
+
+        let lines_before = std::fs::read_to_string(&log_path).unwrap().lines().count();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let beats = Arc::new(AtomicUsize::new(0));
+        let (first_beat_tx, first_beat_rx) = mpsc::channel::<()>();
+
+        let writer = {
+            let state = Arc::clone(&app_state);
+            let stop = Arc::clone(&stop);
+            let beats = Arc::clone(&beats);
+            std::thread::spawn(move || {
+                // Land one heartbeat and announce it, so the export below is
+                // guaranteed to run against a log a concurrent writer has
+                // already touched — no sleep, no race.
+                apply_transition(&state, |_| TransitionPayload::Heartbeat).unwrap();
+                beats.fetch_add(1, Ordering::SeqCst);
+                first_beat_tx.send(()).unwrap();
+
+                // Keep appending for the duration of the export. However many
+                // land is irrelevant to the assertions — they scale together.
+                //
+                // Capped, and yielding between appends, purely for runtime:
+                // every append fsyncs, so an unbounded spin made this test
+                // ~3s against a 0.2s suite and grew the log to no purpose. The
+                // cap never weakens the assertion (which is an equality against
+                // whatever count is reached) and the stop flag still ends the
+                // loop first in the normal case.
+                const MAX_BEATS: usize = 24;
+                while !stop.load(Ordering::SeqCst) && beats.load(Ordering::SeqCst) < MAX_BEATS {
+                    if apply_transition(&state, |_| TransitionPayload::Heartbeat).is_ok() {
+                        beats.fetch_add(1, Ordering::SeqCst);
+                    }
+                    std::thread::yield_now();
+                }
+            })
+        };
+
+        first_beat_rx.recv().expect("writer thread must land its first heartbeat");
+
+        // The export under test: the locked read, plus the formatting and file
+        // writes that happen OUTSIDE the lock — which is precisely the window
+        // where a concurrent heartbeat can interleave.
+        let range_start = chrono::Utc::now() - chrono::Duration::days(1);
+        let range_end = chrono::Utc::now() + chrono::Duration::days(1);
+        let blocks = export_blocks_in_range(&app_state, range_start, range_end).unwrap();
+
+        let xlsx_path = dir.path().join("out.xlsx");
+        export::write_xlsx(&export::xlsx_rows(&blocks, Some(15)), &xlsx_path).unwrap();
+        let json_path = dir.path().join("out.json");
+        std::fs::write(&json_path, serde_json::to_string_pretty(&export::json_export(&blocks, None)).unwrap())
+            .unwrap();
+
+        stop.store(true, Ordering::SeqCst);
+        writer.join().unwrap();
+
+        let beats_written = beats.load(Ordering::SeqCst);
+        let lines_after = std::fs::read_to_string(&log_path).unwrap().lines().count();
+
+        // THE assertion. Every line added is one the heartbeat thread counted
+        // for itself; anything else means export wrote — appended, rewrote,
+        // checkpointed, whatever. Exact equality, but not timing-dependent:
+        // both sides scale together with however many beats actually landed.
+        assert_eq!(
+            lines_after - lines_before,
+            beats_written,
+            "every record added during the export must be attributable to the heartbeat, none to the export"
+        );
+        assert!(beats_written >= 1, "the concurrent writer must actually have written, or this proves nothing");
+
+        // Export produced its outputs and the data is right despite the
+        // concurrent writes: one still-active block, "A".
+        assert!(xlsx_path.exists());
+        assert!(json_path.exists());
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "A");
+        // The exported copy carries a SYNTHETIC end (elapsed-so-far, computed
+        // at the export moment) — documented behaviour in `export.md`, and the
+        // sharpest illustration of what read-only means here: export may shape
+        // its own output freely, so long as nothing flows back.
+        assert!(blocks[0].end.is_some(), "an active block exports with its elapsed-so-far end");
+
+        // …and the stored state proves nothing flowed back. Heartbeats have no
+        // stack effect, so replaying must yield exactly the state we started
+        // with: "A" still active, with NO end. A stray transition from export
+        // would surface here even if it had somehow balanced the line count.
+        let replayed = crate::log::reader::replay(&log_path, None, None).unwrap();
+        let stored_active = replayed.stack.active.as_ref().expect("A must still be active in stored state");
+        assert_eq!(stored_active.name, "A");
+        assert!(stored_active.end.is_none(), "the synthetic export end must never be written back");
+        assert!(replayed.stack.closed.is_empty(), "export must not have closed or created any block");
+        assert_eq!(replayed.stack.stack_depth(), 0);
     }
 }
