@@ -2,10 +2,23 @@
 //! `WM_POWERBROADCAST`. Runs on its own dedicated OS thread with its own
 //! message loop — Tauri's own event loop (on the main thread) never sees this.
 //!
-//! Distinct from startup-based recovered-gap (`state::AppState::init`): this
-//! handles the SAME running process waking from sleep, so per the confirmed
-//! design (see `model::TransitionPayload::RecoverGap` docs), it auto-resumes
-//! the same task identity — a restart does not.
+//! Handled IDENTICALLY to startup-based recovered-gap (`state::AppState::init`):
+//! close the active entry with an inferred end, and start nothing. Wake and
+//! crash are the same class of event — Anchor lost continuity and cannot know
+//! what happened in the gap — so they get the same handling.
+//!
+//! This changed on 2026-07-29 (ADR 0005 open item 9). Wake used to also emit a
+//! `Start` with the same identity, on the reasoning that this is "the SAME
+//! running process" so the task identity is still known. That is true and
+//! beside the point: knowing WHICH task was active is not knowing THAT the user
+//! resumed it, nor WHEN. Someone who wakes a laptop to check the time has not
+//! gone back to work. Anchor was inventing a start time it could not know —
+//! `docs/principles.md` #3.
+//!
+//! The user now resumes deliberately, via the capture action. Note the gap this
+//! does NOT close: `RecoverGap` closes the active block without pushing a stack
+//! frame, so no return path survives a wake or a crash. Pre-existing, symmetric
+//! across both paths, and owned by Pause's design work (issue #16).
 
 use crate::commands::{apply_transition, emit_state_changed};
 use crate::model::{TimeBlock, TransitionPayload};
@@ -21,25 +34,24 @@ pub const RESUME_GAP_THRESHOLD_SECS: i64 = 90;
 /// Pure decision logic, independent of the actual `WM_POWERBROADCAST` wiring so
 /// it's unit-testable without a real sleep/wake cycle. Given the currently
 /// active entry (if any) and how long ago the last durable write was, decide
-/// whether to resolve a gap — and if so, the two transitions to apply in
-/// order: close as `recovered-gap`, then auto-resume the same identity. The
-/// threshold is inclusive (>=): a gap of exactly the threshold counts.
+/// whether to resolve a gap — and if so, the single transition to apply: close
+/// the active entry as `recovered-gap`. The threshold is inclusive (>=): a gap
+/// of exactly the threshold counts.
+///
+/// Returns ONE payload, not a pair. It used to return `(RecoverGap, Start)`;
+/// the return type was collapsed deliberately when ADR 0005 open item 9 removed
+/// the auto-resume, so the second transition cannot be reintroduced by accident
+/// — there is no longer anywhere to put it.
 pub fn resolve_resume_gap(
     active: Option<&TimeBlock>,
     last_activity_at: DateTime<Utc>,
     now: DateTime<Utc>,
-) -> Option<(TransitionPayload, TransitionPayload)> {
-    let active = active?;
+) -> Option<TransitionPayload> {
+    active?;
     if now - last_activity_at < ChronoDuration::seconds(RESUME_GAP_THRESHOLD_SECS) {
         return None;
     }
-    let recover = TransitionPayload::RecoverGap { inferred_end: last_activity_at };
-    let resume = TransitionPayload::Start {
-        name: active.name.clone(),
-        project: active.project.clone(),
-        client: active.client.clone(),
-    };
-    Some((recover, resume))
+    Some(TransitionPayload::RecoverGap { inferred_end: last_activity_at })
 }
 
 /// The AppHandle reachable from the raw WndProc — there is only ever one such
@@ -57,20 +69,18 @@ fn handle_resume(app: &AppHandle) {
         let inner = state.inner.lock().unwrap();
         resolve_resume_gap(inner.stack.active.as_ref(), inner.last_activity_at, now)
     };
-    let Some((recover_payload, resume_payload)) = decision else {
+    let Some(recover_payload) = decision else {
         return;
     };
 
+    // One transition, then done. Nothing is started: the user resumes
+    // deliberately (ADR 0005 open item 9). Per
+    // `docs/product/features/interruption-stack.md`, no prompt interrupts them
+    // at wake either — the closed entry is surfaced in the dashboard whenever
+    // they next open it.
     match apply_transition(&state, |_| recover_payload.clone()) {
         Ok(view) => emit_state_changed(app, &view),
-        Err(e) => {
-            eprintln!("resume-gap recovery (close) failed: {e}");
-            return;
-        }
-    }
-    match apply_transition(&state, |_| resume_payload.clone()) {
-        Ok(view) => emit_state_changed(app, &view),
-        Err(e) => eprintln!("resume-gap recovery (auto-resume) failed: {e}"),
+        Err(e) => eprintln!("resume-gap recovery failed: {e}"),
     }
 }
 
@@ -188,21 +198,54 @@ mod tests {
     }
 
     #[test]
-    fn resolves_recover_gap_then_start_when_gap_exceeds_threshold() {
+    fn resolves_to_recover_gap_alone_when_gap_exceeds_threshold() {
         let now = Utc::now();
         let last_activity = now - ChronoDuration::seconds(RESUME_GAP_THRESHOLD_SECS + 60);
         let block = active_block("A", now - ChronoDuration::seconds(600));
 
-        let (recover, resume) = resolve_resume_gap(Some(&block), last_activity, now).unwrap();
+        let recover = resolve_resume_gap(Some(&block), last_activity, now).unwrap();
 
         match recover {
             TransitionPayload::RecoverGap { inferred_end } => assert_eq!(inferred_end, last_activity),
             other => panic!("expected RecoverGap, got {other:?}"),
         }
-        match resume {
-            TransitionPayload::Start { name, .. } => assert_eq!(name, "A", "auto-resume must reuse the same identity"),
-            other => panic!("expected Start, got {other:?}"),
-        }
+    }
+
+    /// Regression for ADR 0005 open item 9. Wake used to emit `(RecoverGap,
+    /// Start)`, asserting both that the user resumed and when — inventing a
+    /// start time Anchor cannot know (`docs/principles.md` #3). The return type
+    /// is now a single payload precisely so the second transition has nowhere
+    /// to live, but assert the *behaviour* too: a wake must never produce a
+    /// Start, whatever the shape of the signature later becomes.
+    #[test]
+    fn wake_never_auto_starts_a_task() {
+        let now = Utc::now();
+        let last_activity = now - ChronoDuration::seconds(RESUME_GAP_THRESHOLD_SECS + 3600);
+        let block = active_block("A", now - ChronoDuration::seconds(7200));
+
+        let decision = resolve_resume_gap(Some(&block), last_activity, now).unwrap();
+
+        assert!(
+            !matches!(decision, TransitionPayload::Start { .. }),
+            "wake must close the gap and start nothing — the user resumes deliberately"
+        );
+    }
+
+    /// Wake and crash are the same class of event, so they must resolve the
+    /// same way: `state::AppState::init` closes the active entry as a recovered
+    /// gap and starts nothing. Pins that the two paths agree.
+    #[test]
+    fn wake_resolves_the_same_way_startup_recovery_does() {
+        let now = Utc::now();
+        let last_activity = now - ChronoDuration::seconds(RESUME_GAP_THRESHOLD_SECS + 10);
+        let block = active_block("A", now - ChronoDuration::seconds(600));
+
+        let decision = resolve_resume_gap(Some(&block), last_activity, now).unwrap();
+
+        assert!(
+            matches!(decision, TransitionPayload::RecoverGap { .. }),
+            "exactly the transition AppState::init applies on a crashed restart"
+        );
     }
 
     #[test]
