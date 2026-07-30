@@ -16,6 +16,22 @@ export function onStateChanged(callback: (view: StackView) => void): Promise<Unl
   return listen<StackView>(STATE_CHANGED_EVENT, (event) => callback(event.payload));
 }
 
+/**
+ * Begin tracking when nothing is active. Distinct from `switchTask`, which
+ * requires an active block to close — each command is one transition with one
+ * precondition (ADR 0005). `switch` used to silently mean `Start` when nothing
+ * was active; that branch now lives in the caller, where it belongs, because
+ * "what does this button do right now" is a presentation question.
+ *
+ * Calling the wrong one for the current state throws rather than guessing —
+ * `AlreadyActive` or `NoActiveTask`. That is deliberate: both windows track
+ * state live via `onStateChanged`, so a mismatch means the UI was stale, and
+ * failing loudly beats recording a transition the user didn't ask for.
+ */
+export function startTask(name: string, project: string | null, client: string | null): Promise<StackView> {
+  return invoke("start", { name, project, client });
+}
+
 export function switchTask(name: string, project: string | null, client: string | null): Promise<StackView> {
   return invoke("switch", { name, project, client });
 }

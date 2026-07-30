@@ -117,13 +117,41 @@ pub fn switch(
     project: Option<String>,
     client: Option<String>,
 ) -> Result<StackView, String> {
-    let view = apply_transition(&state, |stack| {
-        let name = name_or_default(name, stack);
-        if stack.active.is_none() {
-            TransitionPayload::Start { name, project, client }
-        } else {
-            TransitionPayload::Switch { name, project, client }
-        }
+    let view = apply_transition(&state, |stack| TransitionPayload::Switch {
+        name: name_or_default(name, stack),
+        project,
+        client,
+    })?;
+    emit_state_changed(&app, &view);
+    Ok(view)
+}
+
+/// Begin tracking when nothing is active.
+///
+/// Extracted out of `switch` (2026-07-29). `switch` used to branch on
+/// `stack.active.is_none()` and emit `Start` instead — one command describing
+/// two transitions depending on state, which [ADR 0005] rejected: each of the
+/// five actions has one meaning and its own precondition. `Start` requires
+/// nothing active (`AlreadyActive` otherwise); `Switch` requires something
+/// active (`NoActiveTask` otherwise).
+///
+/// **Choosing between them is a presentation concern, not a domain one.** The
+/// dashboard shows Start or Switch based on `view.active`; the capture hotkey
+/// peeks `AppState::has_active` and dispatches. Neither is inside a transition.
+///
+/// [ADR 0005]: ../../../docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md
+#[tauri::command]
+pub fn start(
+    app: AppHandle,
+    state: State<AppState>,
+    name: String,
+    project: Option<String>,
+    client: Option<String>,
+) -> Result<StackView, String> {
+    let view = apply_transition(&state, |stack| TransitionPayload::Start {
+        name: name_or_default(name, stack),
+        project,
+        client,
     })?;
     emit_state_changed(&app, &view);
     Ok(view)
@@ -333,6 +361,76 @@ pub fn update_hotkey_bindings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `switch` used to branch internally and emit `Start` when nothing was
+    /// active — one command, two transitions, which ADR 0005 rejected. These
+    /// two tests pin the split: each command now has exactly one precondition,
+    /// and choosing between them is the caller's job.
+    #[test]
+    fn switch_is_rejected_when_nothing_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let (state, _) = AppState::init(&path).unwrap();
+
+        let err = apply_transition(&state, |stack| TransitionPayload::Switch {
+            name: name_or_default(String::new(), stack),
+            project: None,
+            client: None,
+        })
+        .unwrap_err();
+        assert!(err.contains("no active task"), "got: {err}");
+
+        assert!(!path.exists() || std::fs::read_to_string(&path).unwrap().lines().count() == 0,
+            "a rejected transition must never be written to the durable log");
+    }
+
+    #[test]
+    fn start_is_rejected_when_something_is_already_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let (state, _) = AppState::init(&path).unwrap();
+
+        apply_transition(&state, |stack| TransitionPayload::Start {
+            name: name_or_default(String::new(), stack),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+
+        let err = apply_transition(&state, |stack| TransitionPayload::Start {
+            name: name_or_default(String::new(), stack),
+            project: None,
+            client: None,
+        })
+        .unwrap_err();
+        assert!(err.contains("already active"), "got: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            1,
+            "only the accepted Start was written"
+        );
+    }
+
+    /// `has_active` is what lets the capture hotkey and the dashboard pick the
+    /// right command without either of them branching inside a transition.
+    #[test]
+    fn has_active_tracks_whether_a_task_is_being_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let (state, _) = AppState::init(&path).unwrap();
+        assert!(!state.has_active(), "nothing active on a fresh state");
+
+        apply_transition(&state, |stack| TransitionPayload::Start {
+            name: name_or_default(String::new(), stack),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+        assert!(state.has_active());
+
+        apply_transition(&state, |_| TransitionPayload::Complete).unwrap();
+        assert!(!state.has_active(), "completing leaves nothing active — capture offers Start again");
+    }
 
     #[test]
     fn rejects_return_previous_on_empty_stack_without_writing_to_log() {

@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import * as R from "ramda";
   import {
+    startTask,
     switchTask,
     interruptTask,
     returnPrevious,
@@ -120,8 +121,14 @@
 
   // A blank name is allowed here — the backend auto-assigns "Anchor N" when
   // given one (see `commands::name_or_default`), same as the hotkeys.
-  function doSwitch() {
-    refresh(switchTask(name.trim(), nullable(project), nullable(client)));
+  //
+  // Start and Switch are separate commands with separate preconditions (ADR
+  // 0005); `switch` no longer silently means Start when nothing is active. The
+  // choice is made here, in the presentation layer, from live state — the same
+  // `view.active` that labels the button.
+  function doStartOrSwitch() {
+    const args = [name.trim(), nullable(project), nullable(client)] as const;
+    refresh(view.active ? switchTask(...args) : startTask(...args));
   }
 
   function doInterrupt() {
@@ -430,7 +437,7 @@
       {/if}
     </div>
     <div class="row">
-      <button onclick={doSwitch}>Switch</button>
+      <button onclick={doStartOrSwitch}>{view.active ? "Switch" : "Start"}</button>
       <button onclick={doInterrupt}>Interrupt</button>
     </div>
   </section>

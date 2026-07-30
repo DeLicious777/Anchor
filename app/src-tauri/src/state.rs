@@ -65,6 +65,21 @@ impl AppState {
         };
         Ok((state, InitReport { torn_line_discarded: result.torn_line_discarded, startup_gap_recovered }))
     }
+
+    /// Read-only peek, for presentation layers deciding which capture action to
+    /// offer — `Start` when nothing is active, `Switch` when something is (see
+    /// `commands::start`). Deliberately NOT a transition, and deliberately not
+    /// used to make that choice inside a command: a command that branches on
+    /// state is the overload ADR 0005 rejected.
+    ///
+    /// The peek-then-act this enables is a two-step, so state can in principle
+    /// change in between (the sleep/wake path can close the active entry from
+    /// another thread). That race is safe by construction: the follow-up
+    /// transition simply fails its precondition and reports it, rather than
+    /// silently applying the wrong one.
+    pub fn has_active(&self) -> bool {
+        self.inner.lock().map(|inner| inner.stack.active.is_some()).unwrap_or(false)
+    }
 }
 
 #[cfg(test)]

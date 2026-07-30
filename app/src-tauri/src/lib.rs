@@ -49,8 +49,18 @@ pub fn run() {
                     // instead of just focusing the dashboard's name field.
                     // Each command emits `state-changed` itself on success.
                     let app_handle = app.clone();
+                    // The capture hotkey is one key with two meanings to the
+                    // domain: Start when nothing is active, Switch otherwise.
+                    // That choice lives HERE, in the presentation layer, rather
+                    // than inside a command — `commands::switch` used to branch
+                    // internally, which is the overload ADR 0005 rejected. A
+                    // hotkey has no UI to show which it will do, so it peeks.
+                    let has_active = app.state::<AppState>().has_active();
                     let state = app.state::<AppState>();
                     let result = match action {
+                        HotkeyAction::Switch if !has_active => {
+                            commands::start(app_handle, state, String::new(), None, None)
+                        }
                         HotkeyAction::Switch => commands::switch(app_handle, state, String::new(), None, None),
                         HotkeyAction::Interrupt => commands::interrupt(app_handle, state, String::new(), None, None),
                         HotkeyAction::ReturnPrevious => commands::return_previous(app_handle, state),
@@ -111,6 +121,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::start,
             commands::switch,
             commands::interrupt,
             commands::rename_active,
