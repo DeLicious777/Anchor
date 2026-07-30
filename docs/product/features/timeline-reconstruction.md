@@ -89,6 +89,8 @@ Each operation must survive [`principles.md`](../principles.md) #1 — a stated 
 | **Edit Identity** | Work was attributed to the wrong name/project/client, including an uncorrected `Anchor N` (**R8**) | Keep |
 | **Delete** | A block records something that never happened — tracking started by mistake | Keep |
 
+**Move exists to correct temporal placement while preserving duration.** That is its problem statement, and it is the whole of it.
+
 **Move was scrutinised specifically**, since two Resize operations can reach the same end state. It survives because it expresses a different intent and a different problem: Resize says *the timing was wrong*, Move says *the duration was right and the position was wrong*. Reaching it by resizing both edges would transiently change the duration to something the user never claims — the operation would misrepresent itself mid-gesture. "Dragging a block feels natural on a timeline" was explicitly **not** accepted as justification.
 
 ## Trade-offs
