@@ -16,7 +16,7 @@ related: [docs/vision/vision.md, docs/concept/concept.md, docs/product/users.md,
 Anchor's record is only as good as the user's capture discipline, and capture has three failure modes it currently cannot recover from:
 
 1. **Work that was never captured.** Risk **R3** (med-high likelihood, high impact) — nothing prevents forgetting to press the hotkey. Until now this risk had *no mitigation at all*: forgotten work was simply lost.
-2. **An inferred end time that is wrong.** When Anchor recovers a gap (crash or sleep/hibernate) it infers an end from the last durable write. `interruption-stack.md` has promised since 2026-07-23 that this is "user-correctable… whenever the user next opens the dashboard" — and **no mechanism has ever existed**. That is risk **R9**, and risk **R4** rests on the same missing mechanism.
+2. **An inferred end time that is wrong.** When Anchor recovers a gap (crash or sleep/hibernate) it infers an end from the last durable write. `interruption-stack.md` has promised since 2026-07-23 that this is "user-correctable… whenever the user next opens the dashboard" — and **no mechanism has ever existed**. That is risk **R9**. Risk **R4** — that a wrong inferred end reaches an export and is billed — rests on the same missing mechanism, since its only mitigation was the correction that does not exist.
 3. **Mis-attributed work.** A task tracked under the wrong name, project, or client — or left under an auto-assigned `Anchor N` name (risk **R8**) — fragments export totals under a meaningless label.
 
 `docs/vision/vision.md` requires that a workday be reconstructable "with minimal manual effort and **entirely inside Anchor**." Today, closing any of these three gaps requires editing raw log data or accepting a wrong record. Both are exactly what this project exists to eliminate.
@@ -26,7 +26,7 @@ Anchor's record is only as good as the user's capture discipline, and capture ha
 - **Every gap between the record and reality can be closed inside Anchor.** No scenario should require hand-editing a log file or shrugging at a wrong entry.
 - **The record stays honest about itself.** Reconstructed work is permanently distinguishable from live-captured work, and adjusted work from untouched work — via `CaptureOrigin`, already in the model. A reader can always tell how much of a day was captured versus reconstructed.
 - **Reconstruction cannot express something capture could not have produced.** No overlapping blocks, no future-dated work. This is a correction mechanism, not a richer parallel model.
-- **Capture discipline stays measurable.** Reconstruction makes risk **R10** falsifiable rather than worse: it shows up as a falling Capture Rate, not as invisible drift.
+- **Capture discipline stays measurable.** Risk **R10** is that an always-available editing surface erodes the in-the-moment capture this product depends on — reconstruction quietly becoming the default path. This design does not remove that risk, but it makes it *falsifiable*: reconstructed minutes carry `CaptureOrigin::ManualEntry`, so erosion shows up as a falling Capture Rate rather than as invisible drift.
 - Ties to `docs/vision/vision.md`'s "minimal manual effort, entirely inside Anchor" and closes the mechanism gap behind **R9**, **R4**, and the only mitigation **R3** has.
 
 ## Users
@@ -34,7 +34,7 @@ Anchor's record is only as good as the user's capture discipline, and capture ha
 Serves the single primary persona in `docs/product/users.md` — the interrupted billable developer — with no new segment. Two persona properties constrain the design directly:
 
 - *"Values speed and low friction above all."* Reconstruction is the **exception path**. It may be deliberate and slower than capture, but it must never become the fast path, or the product stops being capture-first.
-- *Comfortable with hotkeys, not needing onboarding.* No wizards, no confirmation dialogs for reversible actions.
+- *Comfortable with hotkeys, not needing onboarding.* No wizards, no explanatory chrome, no first-run tour. Confirmation dialogs are reserved for actions that are **not** reversible — which is why Delete's status depends on undo existing (see UX).
 
 ## Alternatives
 
@@ -105,6 +105,8 @@ Each operation must survive [`principles.md`](../principles.md) #1 — a stated 
 Owned by the ux-designer; the Timeline Editor's visual form belongs to #14, not here.
 
 - **Add** — draw a span on the Timeline Editor. Opens naming with the same autocomplete Rename uses (Task Templates plus past task history, source-tagged). The new block is `CaptureOrigin::ManualEntry`.
+
+  **An added block is a single independent Time Block. It never touches the interruption stack**, carries no `InterruptionOutcome` (so its `DerivedInterruptionStatus` is `NeverInterrupted`), and pushes no frame. There is deliberately **no way to reconstruct an interruption *relationship*** after the fact — you can add the two blocks that a real interruption would have produced, but not the stack semantics between them. The stack is a live structure recording what the user actually did in the moment; inventing one retroactively would fabricate provenance, which is the opposite of what `CaptureOrigin` exists to prevent.
 - **Move / Resize** — direct manipulation, **clamped at neighbouring boundaries**. The clamp must be *visible*: the block stops at the boundary and the boundary itself indicates it is the limit. A user who drags harder must understand why nothing more is happening — a silent clamp reads as a broken UI.
 - **Edit Identity** — same fields and autocomplete as Rename, on a historical block.
 - **Delete** — no confirmation dialog *provided undo exists*. As written that is a circular dependency: this doc justified skipping confirmation by calling delete reversible, while deferring undo to the Timeline Editor (#14). **Resolved here as a hard prerequisite** — #14 must provide undo, or delete gains a confirmation step. Deleting a Time Block is destroying a billing record; it may not be both unconfirmed and irreversible.

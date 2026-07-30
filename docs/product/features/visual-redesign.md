@@ -52,16 +52,23 @@ No new user segment is implied. Per `docs/product/users.md`, if one were, that d
 
 ## Decisions taken (2026-07-28)
 
-**1. The design system's timeline-first premise governs.** Its README opens: *"Anchor is a work-time-tracking product built on a timeline-first premise: the workday is a continuous line to capture, view, and edit — timesheets are a generated report, not the primary interface."* The author chose this over the accepted hotkey-first Concept, in full knowledge that it is a Concept-level change.
+**1. The design system's timeline-first premise governs — and the Concept revision it triggered has since run and been accepted.**
 
-Most of that sentence is already true of Anchor. The conflict is narrower than "the whole product changes," and precisely two things are genuinely in conflict:
+**Outcome first, because everything below is how it was reached:** Anchor is **capture-first, timeline-assisted**. Primary capture stays sub-second on hotkeys and the mini widget; the Timeline is the canonical visualization and a reconstruction workspace, not a data-entry surface. **Nothing about the capture path changed.** What this feature gained is a settled definition of the dashboard's role — the thing the IA work needed.
+
+<details>
+<summary>How that was reached (historical; safe to skip)</summary>
+
+The design system's README opens: *"Anchor is a work-time-tracking product built on a timeline-first premise: the workday is a continuous line to capture, view, and edit — timesheets are a generated report, not the primary interface."* The author chose this over the accepted hotkey-first Concept, in full knowledge that it was a Concept-level change.
+
+Most of that sentence was already true of Anchor. The conflict was narrower than "the whole product changes," and precisely two things were genuinely in conflict:
 
 - **(a) Editing.** "Capture, view, and **edit**" — timeline editing does not exist and is not in MVP scope. This is `docs/risks.md` **R9** and `ideas/manual-time-block-entry.md`. Under the new premise it stops being a deferred nice-to-have and becomes premise-critical.
 - **(b) Which surface is primary.** The accepted docs make hotkeys and the mini widget primary, with the dashboard deliberate and secondary. `docs/product/features/interruption-stack.md` states the dashboard is "not meant for rapid interaction — opened deliberately, not part of the fast switch/interrupt/return loop." A timeline-first product inverts that.
 
 Everything else the design system's premise asserts — the workday as a continuous line, timesheets as generated output rather than the interface — the accepted docs already say (flat timeline model in `docs/product/mvp.md`; export as generated output in `docs/product/features/export.md`).
 
-**Blast radius — what this invalidates and must be revised before this feature resumes:**
+**Blast radius as predicted at the time — retained for history, and two rows of it turned out to be wrong. Do not read this table as current:**
 
 | Doc | What changes |
 |---|---|
@@ -81,13 +88,15 @@ The Concept revision ran and settled this. The outcome was **narrower than the t
 - **What did change:** two `vision.md` success criteria were absolute in a way the product isn't — "no manual reconciliation" and "without hand-editing" became "minimal manual effort, entirely inside Anchor" and "no post-processing in Excel or any external tool." `concept.md`'s differentiator claim was rewritten around evidence: the timeline is explicitly *not* the differentiator (Toggl already ships drag-create/drag-edit), the interruption model is.
 - **Timeline reconstruction entered MVP scope**, subsuming R9. `docs/product/mvp.md` records an unpaid scope trade this created.
 
-**This feature is unblocked for Alternatives** once `vision.md`/`concept.md` return to `accepted` via the Discovery workflow's Stage 5 reviewer pass. The IA work can now proceed against a settled premise: a dashboard organized around a timeline that is reviewed and refined deliberately, with capture living in the widget.
+What was **not** affected: [ADR 0001](../../decisions/0001-manual-assisted-tracking-for-mvp.md) survives intact — timeline editing is still the user stating what happened, never activity inference. [ADR 0003](../../decisions/0003-billable-classification-out-of-scope.md) is untouched; the design system's "timesheet" means generated output, which is what `export.md` already produces.
 
-What is **not** affected: [ADR 0001](../../decisions/0001-manual-assisted-tracking-for-mvp.md) survives intact — timeline editing is still the user stating what happened, never activity inference. [ADR 0003](../../decisions/0003-billable-classification-out-of-scope.md) is untouched; the design system's "timesheet" means generated output, which is what `export.md` already produces.
+`vision.md` and `concept.md` returned to `accepted` on 2026-07-28, which is what unblocked the Alternatives below.
+
+</details>
 
 **2. Tokens transfer, components are rebuilt as needed.** Every design-system component is React JSX (`components/**/*.jsx`); Anchor is Svelte ([ADR 0002](../../decisions/0002-desktop-app-framework-and-platform.md), `docs/architecture/constraints.md`). The CSS tokens (`tokens/colors.css`, `tokens/spacing.css`, `tokens/typography.css`) are imported directly; Svelte components are hand-built only for what the two windows actually use, with the JSX kept as a reference spec rather than ported wholesale.
 
-**3. Per-project tag hues use a persisted mapping.** An explicit, user-controlled project→hue mapping, stable across renames. **Constraint this must respect:** `docs/product/mvp.md` establishes there is no stored task entity and that aggregation happens at export time by exact name/project/client match. This mapping is presentation-only — it must never become an aggregation key, or it silently changes export output. Worth stating in Technical Constraints once that stage is reachable.
+**3. Per-project tag hues use a persisted mapping.** An explicit, user-controlled project→hue mapping, stable across renames. **Constraint this must respect:** `docs/product/mvp.md` establishes there is no stored task entity and that aggregation happens at export time by exact name/project/client match. This mapping is presentation-only — it must never become an aggregation key, or it silently changes export output. Now carried as a Technical Constraint below.
 
 **4. The widget uses a constrained subset** of the dashboard's component set — same tokens, fewer components, tighter density — not a distinct visual language. Resolves the open question carried from `ideas/visual-redesign.md`.
 
