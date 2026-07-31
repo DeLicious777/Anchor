@@ -2,7 +2,7 @@
 status: draft
 date: 2026-07-29
 owner: erich
-related: [docs/decisions/0004-transition-log-format-and-torn-write-scheme.md, docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md, docs/product/features/timeline-reconstruction.md, docs/product/features/interruption-stack.md, docs/product/features/export.md, docs/architecture/constraints.md, docs/principles.md, docs/risks.md]
+related: [docs/decisions/0004-transition-log-format-and-torn-write-scheme.md, docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md, docs/product/features/timeline-reconstruction.md, docs/product/features/interruption-stack.md, docs/product/features/export.md, docs/architecture/constraints.md, docs/principles.md, docs/risks.md, docs/assumptions.md, docs/glossary.md]
 ---
 
 # 0006: Stable, Persistent Time Block Identity
@@ -10,6 +10,8 @@ related: [docs/decisions/0004-transition-log-format-and-torn-write-scheme.md, do
 > `status: draft`. This is the architectural prerequisite for timeline reconstruction (#15) — that feature cannot be accepted or implemented until this is settled.
 >
 > **Revised 2026-07-29 after its own independent review.** The decision — derive identity from the creating transition's `seq` — was upheld; three things were not. The review's strongest objection was that a fixed namespace over `seq` gives no *global* uniqueness. Investigating that against accepted project material established that **global uniqueness is not a requirement of this project at all**: `export.md` does not specify an `id` field, the billing path never carries one, multi-user and sync are explicitly out of scope, and no ADR states an identity requirement. The objection was therefore **reframed, not accepted** — the defect was this document overclaiming in Consequences, not the derivation. See the Decision's non-goal, and option G.
+>
+> **Revised again 2026-07-29 after a second independent review.** That review found the derivation sound and proposed no alternative, but caught that the Decision named the namespace and never the **encoding** — and since UUIDv5 hashes bytes, `seq.to_string()`, `to_be_bytes()` and `to_le_bytes()` give three different ids from the same number. The encoding was as load-bearing as the namespace and was being left to implementation; it is now fixed in the Decision and pinned by test vectors. The same pass recorded that this ADR does *not* decide whether reconstruction payloads carry the derived UUID or the `seq`, and broadened the open writer defect (**R14**) to cover a partial `write_all`, not only a failed `sync_all`.
 >
 > Two genuine defects were fixed: `seq` uniqueness was asserted from a *document* rather than the code and **does not hold today** (see Verified facts), and the claim that compaction was "unaffected" was wrong — the snapshot must persist ids (see Relationship to existing ADRs).
 
@@ -34,7 +36,7 @@ Found by independent review, after `timeline-reconstruction.md` asserted the opp
 
 **`seq` uniqueness does not hold today, and this decision depends on it.** An earlier draft listed monotonic `seq` as a verified fact citing ADR 0004 — that is a *document*, not the code, which is exactly the failure [`principles.md`](../principles.md) #8 names and risk **R11** tracks. Checked against `log/writer.rs`, two reuse paths exist:
 
-1. **A failed `sync_all` after a successful `write_all`.** `append` does `write_all` → `sync_all` → `next_seq += 1`. If `sync_all` errors, `next_seq` is not incremented while a complete, checksum-valid line for that `seq` may already have reached disk. `apply_transition` surfaces the error as a string and the app continues with the same writer, so the next append reuses that `seq`.
+1. **A `seq` consumed by an append that did not fully and durably complete.** `append` does `write_all` → `sync_all` → `next_seq += 1`, so `next_seq` advances only if *both* succeed, while bytes may already have reached disk either way. A failed `sync_all` leaves a complete, checksum-valid line for that `seq` on disk; a failed or *partial* `write_all` leaves an unterminated fragment — and because the tail truncation above runs at `open`, a mid-session fragment is not repaired before the next append concatenates onto it. `apply_transition` surfaces the error as a string and the app continues with the same writer either way.
 2. ~~**The discarded torn tail is never truncated.**~~ **Fixed 2026-07-29** — [`78096a8`](https://github.com/DeLicious777/Anchor/commit/78096a8), issue #18, risk **R5**. `LogWriter::open` now truncates any bytes after the final record boundary, so an append always starts on a fresh line.
 
    Investigation established this was **not** a `seq`-reuse path at all, and was worse than described: the concatenated line broke replay, so every transition committed after a torn write was permanently lost and `next_seq` stalled — meaning successive *sessions* reissued the same `seq`, which under this ADR's scheme would have given three different pieces of work the same id. That is now closed and regression-tested; `seq` advances normally across a torn write.
@@ -131,7 +133,19 @@ The cost of rejecting it: no global uniqueness, and the loss of an incidental gu
 ANCHOR_NAMESPACE = becbca30-958b-4568-a9ec-dd5ed1dbf612
 ```
 
-Fixed here rather than deferred to implementation, because a value that must never change belongs in the accepted decision. **It becomes part of the durable contract** the moment any reconstruction transition references an id.
+**The name hashed under that namespace is the ASCII decimal representation of `seq`** — unpadded, unprefixed, no separators. In Rust: `Uuid::new_v5(&ANCHOR_NAMESPACE, seq.to_string().as_bytes())`.
+
+Stating the encoding is not pedantry. `seq` is a `u64` and UUIDv5 hashes a *byte string*, so `b"42"`, `42u64.to_be_bytes()` and `42u64.to_le_bytes()` yield three different UUIDs — the encoding is exactly as load-bearing as the namespace, and exactly as unchangeable once a reference is stored. Decimal is chosen over a byte representation because it matches how `seq` already appears in the log's JSON, so an id can be reproduced by hand from a log line. **Pinned by test vectors, so the contract is held by an assertion rather than by prose:**
+
+| `seq` | `id` |
+|---|---|
+| `0` | `18885148-20dd-5b7c-a7d3-d7844af7a220` |
+| `1` | `24d50f72-3754-5b11-8e57-ec5329a394af` |
+| `42` | `7d8aafb1-dfaf-59a2-bab1-d1a0a0f3e7f7` |
+
+Both the namespace and the encoding are fixed here rather than deferred to implementation, because values that must never change belong in the accepted decision.
+
+**What makes them a durable contract is a decision this ADR does not make.** They are permanent only if reconstruction payloads carry the derived *UUID*. If a payload carried the *`seq`* instead, the derivation would stay purely in-memory and remain changeable, and the log would stay readable by eye — one of the two axes ADR 0004 chose JSONL on. This ADR assumes the UUID because `TimeBlock.id` already is one and the frontend already types it as such, but that is a consequence of an existing field, not an argument. **The choice belongs to whichever design specifies the reconstruction payloads**, and it should be made deliberately there rather than inherited from here.
 
 ### Scope of the guarantee — and an explicit non-goal
 

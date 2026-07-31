@@ -14,7 +14,11 @@ related: [docs/product/features/interruption-stack.md, docs/decisions/0002-deskt
 >
 > **[ADR 0006](0006-stable-persistent-time-block-identity.md) (2026-07-29)** derives persistent Time Block identity as `UUIDv5(namespace, seq)` from the `seq` this ADR defines. **No decision here changes** — no record shape, no checksum framing, no torn-write handling, no compaction trigger. Two things a reader of this ADR alone does need to know:
 >
-> - **`seq` now has a second consumer, and its uniqueness is load-bearing beyond watermark filtering.** ADR 0006 documents two paths in `log/writer.rs` by which a `seq` can currently be reused — a failed `sync_all` that leaves `next_seq` un-incremented, and a discarded torn tail that is never truncated. Both already make this ADR's watermark filter undefined for the affected lines; ADR 0006 makes them silent identity corruption as well. Closing them is a prerequisite of that ADR.
+> - **`seq` now has a second consumer, and its uniqueness is load-bearing beyond watermark filtering.** A reused `seq` already makes this ADR's watermark filter undefined for the affected lines; under ADR 0006 it is silent identity corruption as well.
+>
+>   **One such path is closed** (2026-07-29, [`78096a8`](https://github.com/DeLicious777/Anchor/commit/78096a8), issue #18): a discarded torn tail was never truncated, so the next append was concatenated onto it. That turned out to be worse than `seq` reuse — it permanently destroyed everything written after a torn write, falsifying this ADR's "a torn write can only affect the last record". `LogWriter::open` now truncates to the final record boundary. See `docs/risks.md` R5.
+>
+>   **One path remains open**, tracked as `docs/risks.md` **R14**: a `seq` can still be consumed by an append that did not fully and durably complete — a failed or partial `write_all`, or a failed `sync_all` — because `next_seq` is only incremented after both succeed, while bytes may already have reached disk. Closing it is a prerequisite of ADR 0006.
 > - **The snapshot must persist each Time Block's `id`.** Blocks below the watermark are never replayed, so their identity can come only from the snapshot. This is the same payload-vs-mechanism gap ADR 0005 closed as assumption A10, in the same document.
 
 ## Context
