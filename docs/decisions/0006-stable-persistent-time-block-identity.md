@@ -8,6 +8,10 @@ related: [docs/decisions/0004-transition-log-format-and-torn-write-scheme.md, do
 # 0006: Stable, Persistent Time Block Identity
 
 > `status: draft`. This is the architectural prerequisite for timeline reconstruction (#15) — that feature cannot be accepted or implemented until this is settled.
+>
+> **Revised 2026-07-29 after its own independent review.** The decision — derive identity from the creating transition's `seq` — was upheld; three things were not. The review's strongest objection was that a fixed namespace over `seq` gives no *global* uniqueness. Investigating that against accepted project material established that **global uniqueness is not a requirement of this project at all**: `export.md` does not specify an `id` field, the billing path never carries one, multi-user and sync are explicitly out of scope, and no ADR states an identity requirement. The objection was therefore **reframed, not accepted** — the defect was this document overclaiming in Consequences, not the derivation. See the Decision's non-goal, and option G.
+>
+> Two genuine defects were fixed: `seq` uniqueness was asserted from a *document* rather than the code and **does not hold today** (see Verified facts), and the claim that compaction was "unaffected" was wrong — the snapshot must persist ids (see Relationship to existing ADRs).
 
 ## Context
 
@@ -26,7 +30,16 @@ Found by independent review, after `timeline-reconstruction.md` asserted the opp
 - Every `TimeBlock` in the domain is constructed inside `stack.rs::apply` — five call sites, one per creating arm (`Start`, `Switch`, `Interrupt`, `ReturnPrevious`, `ReturnOriginal`).
 - `Complete`, `RecoverGap`, `Rename` and `Heartbeat` create none.
 - **Every creating transition therefore creates exactly one Time Block.**
-- `seq` is per-line, monotonically increasing, and assigned to every line including heartbeats ([ADR 0004](0004-transition-log-format-and-torn-write-scheme.md)).
+- `seq` is assigned per line, including heartbeats, and is intended to be monotonic ([ADR 0004](0004-transition-log-format-and-torn-write-scheme.md)).
+
+**`seq` uniqueness does not hold today, and this decision depends on it.** An earlier draft listed monotonic `seq` as a verified fact citing ADR 0004 — that is a *document*, not the code, which is exactly the failure [`principles.md`](../principles.md) #8 names and risk **R11** tracks. Checked against `log/writer.rs`, two reuse paths exist:
+
+1. **A failed `sync_all` after a successful `write_all`.** `append` does `write_all` → `sync_all` → `next_seq += 1`. If `sync_all` errors, `next_seq` is not incremented while a complete, checksum-valid line for that `seq` may already have reached disk. `apply_transition` surfaces the error as a string and the app continues with the same writer, so the next append reuses that `seq`.
+2. **The discarded torn tail is never truncated.** `LogWriter::open` uses `create(true).append(true)`, and nothing truncates to the last good line. A torn line has no trailing newline, so the next record is physically concatenated onto it; on the following restart the combined line fails checksum and everything from that point is discarded — including durably committed transitions.
+
+**This is a pre-existing correctness bug, not one this ADR creates.** `seq` uniqueness is already required by ADR 0004's watermark filtering: two lines sharing a `seq` make that filter undefined regardless of identity. What this ADR changes is the *consequence* — under `Uuid::new_v4()` uniqueness was free, so the bug was an obscure I/O edge; under any derivation it becomes silent identity corruption, because `stack.rs`'s `resolve_paused` and `derived_status` both use `id` as a lookup key.
+
+**Closing it is a prerequisite of implementing this ADR**, and it belongs in the writer, where the invariant lives — not compensated for in the derivation. See Options Considered, G.
 
 ## Options Considered
 
@@ -38,9 +51,9 @@ The writer generates a UUID and puts it in the payload; replay uses the carried 
 - **Wire-format impact**: five variants change. Two of them — `ReturnPrevious` and `ReturnOriginal` — are currently **unit variants**, serialised as `{"type":"return-previous"}`. Adding a field converts them to struct variants. That is a change of shape, not just an added field.
 - **ADR 0004 compatibility**: this genuinely modifies the on-disk contract ADR 0004 declares stable. It is achievable — `Rename` was added additively — but it is a real change requiring an amendment.
 - **Backward compatibility**: workable via `#[serde(default)]`, deserialising old lines with no id.
-- **Effect on existing history**: **this is the disqualifying cost.** Blocks created by pre-change log lines have no carried id, so they fall back to a generated one and remain unaddressable forever. History splits into an editable generation and a non-editable one, permanently, at an arbitrary date. The user's existing record would be partly beyond repair — in a feature whose entire purpose is repairing the record.
+- **Effect on existing history**: blocks created by pre-change log lines carry no id and would fall back to a generated one, leaving them unaddressable — history split into an editable generation and a non-editable one, at an arbitrary date, in a feature whose purpose is repairing the record.
 
-**Rejected**, primarily on that last point.
+**Rejected** — but on cost, not impossibility. That split is not *forced* by this option: A and B compose, carrying an explicit id going forward and falling back to `seq` derivation for older lines. The honest reason to reject A is that the composition is strictly more machinery than B alone, for no additional guarantee the project requires — two identity sources to keep consistent, plus a wire-format change to five variants, two of which change shape.
 
 ### B. Derive identity deterministically from the creating transition's `seq`
 
@@ -82,6 +95,20 @@ Assign identity from a counter incremented during replay traversal — the *n*-t
 
 The general principle, which outlives this specific mechanism: **identity must derive from data carried in the event, not from how a given run happens to traverse the log.** `seq` is carried in the record; traversal position is an artefact of the reader.
 
+### G. Derive from the record rather than `seq` alone — `UUIDv5(namespace, seq ‖ timestamp)`
+
+Proposed by the independent review as a fix for cross-lineage collision. Both fields already exist in `TransitionRecord`, so it costs no format change and the same five call sites.
+
+**Rejected — it is technically correct but architecturally unnecessary, and it would mask a bug rather than fix one.** Three reasons, in order of weight:
+
+1. **It solves a problem the project does not have.** Its benefit is global uniqueness, which the Decision above establishes is not a requirement — no consumer of exported ids exists, and `export.md` does not even specify the field.
+2. **It would hide `seq` reuse instead of fixing it.** Two lines sharing a `seq` would receive distinct ids, so identity would appear correct while ADR 0004's watermark filter remained undefined for those lines. Compensating for one subsystem's broken invariant inside another subsystem makes the real defect *harder to detect*, and leaves it in place. The correct fix is the writer contract.
+3. **It broadens the contract without a demonstrated requirement**, making identity depend on timestamp *serialisation* stability — formatting, precision, timezone rendering — which is a genuine new dependency traded for a hypothetical benefit. [`principles.md`](../principles.md) #1.
+
+The cost of rejecting it: no global uniqueness, and the loss of an incidental guard against the writer bug. Both are accepted knowingly, the second because the guard would be papering over something that must be fixed regardless.
+
+**Also considered and rejected: a per-lineage namespace** — mint a random namespace UUID when a log is created and store it in a log header. That would give global uniqueness *and* `seq` derivation, but requires a log-format change to satisfy a non-requirement.
+
 ## Trade-offs
 
 | | A. Explicit UUID | **B. Derive from `seq`** | C. Content-addressed | D. Replacement state | E. Registry | F. Replay counter |
@@ -98,7 +125,29 @@ The general principle, which outlives this specific mechanism: **identity must d
 
 **Time Block identity is derived deterministically from the `seq` of the transition that created the block: `id = UUIDv5(ANCHOR_NAMESPACE, seq)`.**
 
-`ANCHOR_NAMESPACE` is a fixed, project-wide UUID constant, chosen once and never changed. **It becomes part of the durable contract** the moment any reconstruction transition references an id.
+```
+ANCHOR_NAMESPACE = becbca30-958b-4568-a9ec-dd5ed1dbf612
+```
+
+Fixed here rather than deferred to implementation, because a value that must never change belongs in the accepted decision. **It becomes part of the durable contract** the moment any reconstruction transition references an id.
+
+### Scope of the guarantee — and an explicit non-goal
+
+**A Time Block's identity is stable within a single append-only log lineage. This ADR does not provide globally unique identities across unrelated Anchor histories. Global uniqueness is explicitly a non-goal** unless a future accepted requirement establishes one.
+
+Stated in the Decision rather than buried in Consequences, so that anyone revisiting this — while implementing sync, import, or multi-device support — sees immediately that the limitation is **intentional, not accidental**.
+
+Concretely: a fresh log, a restored backup, or a second installation will reuse the same ids for entirely unrelated work. The first block in every Anchor log is the same UUID.
+
+**Why that is acceptable, established from accepted project material rather than assumed:**
+
+- **`docs/product/features/export.md` never specifies an `id` field.** Its documented full-fidelity JSON shape is name, project, client, start, end, duration, plus the three metadata fields. The id reaches the output only because `TimeBlock` derives `Serialize` — it is unspecified output, not a contract.
+- **The billing path never carries an id at all.** XLSX columns are Name / Project / Client / Duration. [ADR 0003](0003-billable-classification-out-of-scope.md) puts classification in a downstream process fed by those columns.
+- **Multi-user accounts and sync are explicitly out of scope** (`docs/product/mvp.md`, `docs/product/users.md`). `docs/vision/vision.md` raises moving beyond personal use as an *open question*, not a requirement.
+- **No accepted ADR states an identity or uniqueness requirement.**
+- **Import is future work** — `docs/architecture/constraints.md` says "any *future* import."
+
+A globally unique scheme was considered and rejected as solving a problem the project does not have: it would trade a real new dependency (identity resting on timestamp *serialisation* stability, or a log-format change for a per-lineage namespace) for a benefit no accepted requirement asks for. See Options Considered, G.
 
 Why this fits Anchor specifically:
 
@@ -118,11 +167,23 @@ The invariant must be **enforced by test**, not assumed from inspection.
 
 **If a future feature requires a transition to create multiple Time Blocks, this ADR must be revisited** — with a new ADR superseding it — rather than the identity scheme being silently extended with an ordinal or similar. A scheme extended in passing is exactly how a contract gets broken without anyone deciding to break it.
 
+**The most plausible violator is import, and it is already an accepted commitment, not a hypothetical.** `docs/architecture/constraints.md` states that every input path produces transitions and nothing else, naming "any future import" explicitly. A batch import creating N blocks in one transition would break this invariant directly. It is out of scope today; it is the first thing to check against this ADR when it arrives.
+
+**Verified against reconstruction as designed:** the invariant holds. Add creates one block; Move, Resize, Edit Identity and Delete create none; the overlap policy is clamping, not splitting.
+
+**One open tension, recorded rather than resolved.** `timeline-reconstruction.md` makes undo a hard prerequisite for unconfirmed Delete. Undoing a Delete forces a choice this ADR does not make: either the undo transition re-creates the block carrying its **original** id — which breaks "identity derives from the creating transition's `seq`" as a universal rule and makes the scheme a hybrid — or it creates a block with a **new** id and must carry the deleted block's full prior state, which is the replacement-state shape option D was rejected for. Both are arguable; neither is free. **This must be settled when undo is designed (#14), and it may require revisiting this ADR.**
+
 Deliberately *not* pre-built: a `(seq, ordinal)` derivation to leave room for that case. Per [`principles.md`](../principles.md) #1, no case for it exists, and building for a hypothetical is what that principle rejects.
 
 ## Relationship to existing ADRs
 
-- **[ADR 0004](0004-transition-log-format-and-torn-write-scheme.md) remains the sole authority for the append-only log format** — record shape, checksum framing, torn-write detection, compaction and the watermark. **This ADR changes none of it.** ADR 0004 gets a pointer note, as it did for ADR 0005's snapshot-payload guarantee; its decisions stand unamended.
+- **[ADR 0004](0004-transition-log-format-and-torn-write-scheme.md) remains the sole authority for the append-only log format** — record shape, checksum framing, torn-write detection, compaction and the watermark. **This ADR changes none of its decisions**, and adds no field to any record.
+
+  **It does add one normative requirement to the snapshot, and an earlier draft wrongly claimed compaction was "unaffected."** Blocks below the watermark are never replayed — `log/reader.rs` skips those lines entirely — so their identity can come only from the snapshot. Therefore:
+
+  > **The snapshot MUST persist each Time Block's `id`** (or the `seq` it derives from) exactly, alongside the unresolved stack frames ADR 0005 already requires.
+
+  This is the *same gap* ADR 0005 had to close as assumption **A10**: ADR 0004 specified compaction's mechanism and never its payload, and a decision was built on the unstated assumption. One ADR later, in the same document, in the same shape. It is [`principles.md`](../principles.md) #4 verbatim — *only materialised state survives* — and it costs nothing to state now, because compaction is unimplemented. Discovering it after a snapshot format ships costs a migration.
 - **This ADR defines how persistent Time Block identity is *derived from* that log.** Identity is a projection, consistent with `docs/architecture/constraints.md`: the event log is the single source of truth and all state is replayed from it.
 - **[ADR 0005](0005-event-model-time-block-metadata-and-reconstruction-transitions.md)** is unaffected. Its three metadata fields, the `DerivedInterruptionStatus` projection, and its snapshot-payload guarantee all hold unchanged. Its open items 1–4 concern reconstruction *semantics*, not identity, and are resolved by `timeline-reconstruction.md` rather than here.
 - **`timeline-reconstruction.md` must cite this ADR for persistent identity** and retract its claim that reconstruction imposes *"no new requirement."* It does impose one; this is it.
@@ -135,8 +196,10 @@ No accepted ADR is reopened.
 
 - Enable the `uuid` crate's `v5` feature — `Cargo.toml` currently has only `v4` and `serde`.
 - Choose and fix `ANCHOR_NAMESPACE`.
-- Thread the record's `seq` into block construction at the five `TimeBlock::new` call sites in `stack.rs::apply`. Note `apply` currently receives `timestamp` but **not** `seq`, so its signature changes — the one non-trivial piece.
-- Add a test enforcing the one-block-per-transition invariant.
+- **Close the `seq` reuse paths in `log/writer.rs`** — make seq allocation and durable append atomic, and truncate a discarded torn tail rather than appending after it. **This is a prerequisite, not a follow-up**: it is already required by ADR 0004's watermark filtering, and this ADR turns its absence into silent identity corruption.
+- Thread the record's `seq` into block construction at the five `TimeBlock::new` call sites in `stack.rs::apply`. Note `apply` currently receives `timestamp` but **not** `seq`, so its signature changes.
+- **`apply_transition` dry-runs on a clone before any record exists**, so it must be handed the writer's `next_seq`; the dry-run and the real apply must agree on it, and a rejected or failed append must not consume it. Same seam as the reuse paths above — this is the genuinely non-trivial piece, not the signature change.
+- Add tests enforcing **both** the one-block-per-transition invariant and **id uniqueness across a full replay**. The second matters because `resolve_paused` and `derived_status` use `id` as a lookup key: their correctness was previously guaranteed by v4 randomness and is now a consequence of the derivation, so a duplicate resolves the wrong block silently rather than failing.
 
 **Replay determinism.** Replaying a log twice now yields byte-identical state including ids. This is a genuine strengthening beyond what this ADR needs: restart-equivalence tests can assert full equality rather than field-by-field comparison with ids excluded.
 
@@ -148,7 +211,11 @@ That comment becomes false, and the test's field-by-field comparison — which d
 
 **Impact on reconstruction.** Unblocks it. Move, Resize, Edit Identity and Delete gain a target that survives replay. Reconstruction transitions carry a `Uuid` resolved against blocks whose identity is recomputed identically on every pass.
 
-**Impact on export.** `TimeBlock.id` is already serialised into full-fidelity JSON. Today those ids are random and change on every restart, making them meaningless to any consumer. After this change they are **stable and reproducible** — an export of the same range yields the same ids every time. This is an improvement, and it carries an obligation: an exported id becomes a durable external reference, so changing the derivation later would break anything that stored one. Grouped exports are unaffected; they carry no per-block metadata.
+**Impact on export.** `TimeBlock.id` is already serialised into full-fidelity JSON — incidentally, because `TimeBlock` derives `Serialize`; `export.md` does not specify the field. Today those values are random and change on every restart, making them meaningless. After this change they become **reproducible within one log lineage**: exporting the same range twice from the same log yields the same ids.
+
+**They do not become globally durable references.** A fresh log, a restored backup, or a second installation reuses the same ids for unrelated work — see the Decision's non-goal. That is acceptable only because no consumer depends on them, and the billing path never receives one. **If any consumer ever comes to depend on exported ids, this ADR must be revisited**, because the guarantee it provides is narrower than such a consumer would need.
+
+Grouped exports are unaffected; they carry no per-block metadata.
 
 **What this does not do.** It does not make ids meaningful to a *user*, does not create a stable identity for a *task* (there is still no task entity — `docs/product/mvp.md`'s flat model is untouched), and does not survive a user deleting and re-adding a block, which correctly produces a different block.
 
@@ -161,4 +228,9 @@ Other review findings are untouched and remain open.
 
 ---
 
-**Revisit this decision (new ADR) if:** a transition ever needs to create more than one Time Block; or an external consumer comes to depend on exported ids in a way that makes the derivation function costly to keep; or compaction is ever redesigned such that `seq` is no longer stable for the lifetime of a block.
+**Revisit this decision (new ADR) if:**
+
+- a transition ever needs to create more than one Time Block — **import is the most likely trigger**, and it is already an accepted commitment in `docs/architecture/constraints.md`;
+- **any external consumer comes to depend on exported ids**, or cross-lineage identity becomes an accepted requirement — sync, multi-device, or import across installations would each do this, and the Decision's non-goal would no longer hold;
+- undo of a Delete is designed (#14) and requires re-creating a block under its original id;
+- or compaction is redesigned such that `seq` is no longer stable for the lifetime of a block.
