@@ -182,6 +182,115 @@ mod tests {
         assert_eq!(result.next_seq, 3, "next_seq must resume from the last good record (seq 2), ignoring the torn line entirely");
     }
 
+    /// Continues the test above past the point it stops at — the step that
+    /// actually happens in production: the user keeps working after the restart.
+    ///
+    /// The torn fragment is discarded *logically* by the reader but is never
+    /// removed from the file, and `LogWriter::open` appends. Since a torn
+    /// fragment has no trailing newline, the next record is written onto the
+    /// same physical line. `decode_line` splits on the LAST tab, so the checksum
+    /// is then verified over `fragment + json` rather than `json`, mismatches,
+    /// and `replay` breaks there — on this and every subsequent run.
+    ///
+    /// Expected consequence: every transition committed after a torn write is
+    /// permanently lost, and the log accepts no further durable writes while
+    /// appearing healthy to the running process.
+    #[test]
+    fn work_committed_after_a_torn_write_survives_the_next_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        {
+            let mut writer = LogWriter::open(&path, 0).unwrap();
+            writer.append(payload("A")).unwrap(); // seq 0
+            writer
+                .append(TransitionPayload::Switch { name: "B".into(), project: None, client: None })
+                .unwrap(); // seq 1
+            writer
+                .append(TransitionPayload::Switch { name: "C".into(), project: None, client: None })
+                .unwrap(); // seq 2
+        }
+        // Crash mid-write of seq 3: a fragment with no tab, no checksum, and
+        // crucially no trailing newline.
+        {
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(b"{\"seq\":3,\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"star").unwrap();
+        }
+
+        // Restart: the app recovers, discards the torn tail, and resumes writing.
+        let after_crash = replay(&path, None, None).unwrap();
+        assert!(after_crash.torn_line_discarded);
+        assert_eq!(after_crash.next_seq, 3);
+        {
+            let mut writer = LogWriter::open(&path, after_crash.next_seq).unwrap();
+            writer
+                .append(TransitionPayload::Switch { name: "D".into(), project: None, client: None })
+                .unwrap(); // seq 3 — durably committed, fsync'd, reported as Ok
+        }
+
+        // Second restart. "D" was committed successfully; it must still be here.
+        let after_restart = replay(&path, None, None).unwrap();
+        assert_eq!(
+            after_restart.stack.active.as_ref().unwrap().name,
+            "D",
+            "a transition that committed successfully must survive a restart"
+        );
+        assert_eq!(after_restart.next_seq, 4, "and next_seq must advance past it");
+    }
+
+    /// The severity case for the test above: before the fix, the damage was not
+    /// a one-off loss — the log stayed broken forever and `next_seq` stalled at
+    /// the torn point, so every subsequent session reissued the same `seq`.
+    /// (Under ADR 0006's `seq`-derived identity that would have been the same id
+    /// for three different pieces of work.)
+    ///
+    /// Now asserts the corrected behaviour: three successive sessions across a
+    /// torn write all survive, and `seq` advances normally.
+    #[test]
+    fn successive_sessions_after_a_torn_write_all_survive_and_seq_advances() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        {
+            let mut writer = LogWriter::open(&path, 0).unwrap();
+            writer.append(payload("A")).unwrap(); // seq 0
+        }
+        {
+            let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(b"{\"seq\":1,\"timestamp\":\"2026-01-01T00:00:00Z\",\"type\":\"star").unwrap();
+        }
+
+        // Three successive sessions, each committing one transition.
+        for name in ["B", "C", "D"] {
+            let r = replay(&path, None, None).unwrap();
+            let mut writer = LogWriter::open(&path, r.next_seq).unwrap();
+            writer
+                .append(TransitionPayload::Switch { name: name.into(), project: None, client: None })
+                .unwrap();
+        }
+
+        let final_state = replay(&path, None, None).unwrap();
+
+        // Every session's work survives; the last one is active.
+        assert_eq!(final_state.stack.active.as_ref().unwrap().name, "D");
+        assert_eq!(
+            final_state.stack.closed.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            vec!["A", "B", "C"],
+            "A switched to B switched to C switched to D — nothing lost across the torn write"
+        );
+
+        // seq advanced normally rather than stalling: 0=A, 1=B, 2=C, 3=D.
+        assert_eq!(final_state.next_seq, 4, "seq must advance past the torn point, never reissue");
+
+        // The torn fragment is gone from disk, not merely skipped.
+        let raw = fs::read_to_string(&path).unwrap();
+        // The fragment's timestamp is unique to it — unlike its `"type":"star`
+        // prefix, which is a substring of every legitimate `"type":"start"`.
+        assert!(
+            !raw.contains("2026-01-01T00:00:00Z"),
+            "the incomplete fragment was truncated, not merely skipped"
+        );
+        assert!(raw.ends_with('\n'), "the log always ends at a record boundary");
+    }
+
     /// Proves replay correctness doesn't depend on truncation having physically
     /// happened: replaying the FULL log with a watermark + seeded starting state
     /// must match replaying a PHYSICALLY TRUNCATED copy of the same log seeded
