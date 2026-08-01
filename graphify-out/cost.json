@@ -17,8 +17,14 @@
       "input_tokens": 0,
       "output_tokens": 143433,
       "files": 64
+    },
+    {
+      "date": "2026-08-01T16:43:32.646941+00:00",
+      "input_tokens": 345808,
+      "output_tokens": 0,
+      "files": 51
     }
   ],
-  "total_input_tokens": 317455,
+  "total_input_tokens": 663263,
   "total_output_tokens": 143433
 }
