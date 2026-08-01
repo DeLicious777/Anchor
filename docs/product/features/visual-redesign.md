@@ -1,8 +1,8 @@
 ---
 status: draft
-date: 2026-07-28
+date: 2026-08-01
 owner: erich
-related: [docs/vision/vision.md, docs/concept/concept.md, docs/product/users.md, docs/product/mvp.md, docs/product/features/interruption-stack.md, docs/product/features/export.md, docs/decisions/0002-desktop-app-framework-and-platform.md, docs/architecture/constraints.md, ideas/visual-redesign.md, ideas/switch-between-mini-and-full-ui.md, ideas/adjustable-timeline-view.md]
+related: [docs/vision/vision.md, docs/concept/concept.md, docs/product/users.md, docs/product/mvp.md, docs/principles.md, docs/risks.md, docs/glossary.md, docs/product/features/interruption-stack.md, docs/product/features/export.md, docs/product/features/timeline-reconstruction.md, docs/decisions/0002-desktop-app-framework-and-platform.md, docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md, docs/decisions/0006-stable-persistent-time-block-identity.md, docs/architecture/constraints.md, ideas/visual-redesign.md, ideas/switch-between-mini-and-full-ui.md, ideas/adjustable-timeline-view.md, ideas/multi-language-ui-support.md]
 ---
 
 # Visual Redesign
@@ -11,7 +11,9 @@ related: [docs/vision/vision.md, docs/concept/concept.md, docs/product/users.md,
 >
 > **Unblocked 2026-07-29.** This doc previously said "Alternatives onward are blocked on a Concept revision." That revision **ran and was accepted on 2026-07-28** (`docs/concept/concept.md`, `docs/vision/vision.md`, [ADR 0005](../../decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md)), so the prerequisite no longer exists. The resolution is recorded under "Decisions taken" below and its outcome was narrower than expected: **Anchor is capture-first, timeline-assisted**, so the hotkey/widget capture path is unchanged and only the dashboard's role gained a definition.
 >
-> **Design pass 2026-07-29** completed Alternatives through Acceptance Criteria. `status: draft` until an independent reviewer pass finds no must-fix items.
+> **Design pass 2026-07-29** completed Alternatives through Acceptance Criteria. **Independently reviewed 2026-08-01**: no architectural blockers, seven must-fixes and four should-fixes, all applied. Two of them mattered more than wording — Alternative C rejected OS-follow theming by citing a decision that did not exist (now decision 5, argued), and the theme-persistence constraint named a shared `settings.json` path that does not exist in the code (four separate files; the accepted `architecture/constraints.md` carried the same error and was corrected with it).
+>
+> **`status: draft`.** Two prerequisites remain, both inputs rather than design questions: the **design system is not in this repository**, so the spacing scale, the hue palette and the font weights this doc depends on cannot be reproduced by anyone but the author (see Technical Constraints); and those values must be recorded here before implementation.
 >
 > **This feature is enabling work, not user-facing scope** (`docs/product/mvp.md` build order, step 3). It establishes the visual foundation the **Timeline Editor** (#14) is built on — designing that editor against today's debug-grade UI would mean building it twice. It does **not** design the editor. Decisions that belong to #14 are explicitly deferred, not absorbed.
 
@@ -22,7 +24,9 @@ The dashboard (`app/src/routes/+page.svelte`) and mini widget (`app/src/routes/w
 This matters for three concrete reasons, not for polish:
 
 1. **It blocks other work.** Two further UI ideas — the mini/full window switch (`ideas/switch-between-mini-and-full-ui.md`) and what became the Timeline Editor (#14, from `ideas/adjustable-timeline-view.md`) — touch the same two surfaces. Designed against the current UI, both get redesigned again afterwards.
-2. **Information architecture, not just styling, is implicated.** The dashboard carries history review, template management, export controls, hotkey settings, and gap correction in one undifferentiated surface. `docs/product/features/interruption-stack.md` establishes that the dashboard is "not meant for rapid interaction — opened deliberately," which is an IA claim the current layout does not express.
+2. **Information architecture, not just styling, is implicated.** The dashboard carries history review, template management, export controls and hotkey settings, and it does the sorting by **surface** rather than by **frequency**: a two-tab split (`+page.svelte:50`, `:362-369`) puts hotkey bindings under Settings and everything else — history, templates, export, the active task — under one Dashboard tab as a flat stack of sections. `docs/product/features/interruption-stack.md` establishes that the dashboard is "not meant for rapid interaction — opened deliberately," which is an IA claim the current layout does not express.
+
+  *(Corrected 2026-08-01. This previously said the dashboard presents everything as "one undifferentiated surface" and listed **gap correction** among them. Neither held: the tab split already exists, and gap correction does not — `+page.svelte:589-590` renders `end_determination` read-only as `inferred`/`exact`, and no command edits a closed block's times. That mechanism is designed but unimplemented; see `docs/risks.md` **R9** and `timeline-reconstruction.md`. Naming an unimplemented capability as present-tense evidence is exactly the failure `principles.md` #8 and **R11** exist to catch.)*
 3. **A design system now exists for this product but was authored without the codebase.** Its own README states no codebase, Figma, or deck was attached and that its components and screens are "original interpretations of the brief." It therefore encodes product assumptions that were never checked against this repo's accepted decisions — see "Open forks."
 
 Evidence is direct inspection of the two route files and `app/src-tauri/tauri.conf.json`, plus the accepted feature docs above. No user research is involved or needed: the sole user is the author (see Users).
@@ -96,13 +100,23 @@ What was **not** affected: [ADR 0001](../../decisions/0001-manual-assisted-track
 
 **2. Tokens transfer, components are rebuilt as needed.** Every design-system component is React JSX (`components/**/*.jsx`); Anchor is Svelte ([ADR 0002](../../decisions/0002-desktop-app-framework-and-platform.md), `docs/architecture/constraints.md`). The CSS tokens (`tokens/colors.css`, `tokens/spacing.css`, `tokens/typography.css`) are imported directly; Svelte components are hand-built only for what the two windows actually use, with the JSX kept as a reference spec rather than ported wholesale.
 
-**3. Per-project tag hues use a persisted mapping.** An explicit, user-controlled project→hue mapping, stable across renames. **Constraint this must respect:** `docs/product/mvp.md` establishes there is no stored task entity and that aggregation happens at export time by exact name/project/client match. This mapping is presentation-only — it must never become an aggregation key, or it silently changes export output. Now carried as a Technical Constraint below.
+**3. Per-project tag hues use a persisted mapping.** An explicit, user-controlled project→hue mapping, **keyed by the project string** and persisted in its own store alongside the other settings (see Technical Constraints).
+
+*"Stable across renames" — the phrase this decision originally used — is withdrawn as ambiguous (2026-08-01).* It could mean either "renaming a **task** does not disturb its project's hue," which is free and true, or "renaming a **project** carries its hue across," which **is not implementable**: there is no project entity and no durable project identifier (`docs/product/mvp.md` — aggregation happens at export time by exact name/project/client match, with no stored task entity; **R2**). Introducing one would create exactly the persisted identity the next sentence forbids. **Renaming a project therefore yields an unmapped project string, which takes the next unused hue** — the same behaviour as a project seen for the first time, and the user can re-assign it. That is a real limitation and it is accepted, not designed around.
+
+What a persisted mapping still buys over hashing the project name to a hue: the user chooses which project gets which colour, and adding a new project cannot silently re-colour an existing one. **Constraint this must respect:** `docs/product/mvp.md` establishes there is no stored task entity and that aggregation happens at export time by exact name/project/client match. This mapping is presentation-only — it must never become an aggregation key, or it silently changes export output. Now carried as a Technical Constraint below.
 
 **4. The widget uses a constrained subset** of the dashboard's component set — same tokens, fewer components, tighter density — not a distinct visual language. Resolves the open question carried from `ideas/visual-redesign.md`.
 
+**5. Light and dark are both first-class, selected by an explicit persisted preference rather than by following the OS.** *(Added 2026-08-01. Alternative C previously cited "decision 3" for this — decision 3 is the hue mapping, and no decision recorded it. The only place the trade had been made was `ideas/visual-redesign.md`, which `CLAUDE.md` explicitly says is not held to feature-doc rigour. Argued here rather than inherited.)*
+
+OS-follow is the cheaper option and was seriously considered: it is one fewer stored value, one fewer control, and it matches what most desktop apps do. It is rejected because Anchor's two windows have **different viewing conditions from each other**, which an OS-level signal cannot express. The widget sits over arbitrary applications all day at `alwaysOnTop`, while the dashboard is opened deliberately and looked at directly. A user who wants a dark widget that disappears into a dark IDE may still want a light dashboard to read a day's timeline in — and the reverse in a bright room. Deferring to one OS-wide bit forecloses that permanently.
+
+The cost is honest: one more persisted setting, one more control to place, and a theme that can now disagree with the OS. Accepted because the preference is set approximately once.
+
 ## Alternatives
 
-Decisions 1–4 above settled the *inputs* (premise, porting strategy, hue mapping, widget language). What follows are the design decisions that remained open once they did.
+Decisions 1–5 above settled the *inputs* (premise, porting strategy, hue mapping, widget language, theme selection). What follows are the design decisions that remained open once they did.
 
 ### A. Interaction philosophy — what the dashboard is *for*
 
@@ -114,26 +128,30 @@ The Concept revision defined the split but not its visual consequence.
 
 ### B. Information hierarchy on the dashboard
 
-Today the dashboard presents history review, template management, export, hotkey settings, and the active task as one undifferentiated stack of sections.
+Today the dashboard has a two-tab split (Dashboard / Settings) with hotkey bindings behind Settings, and everything else — history review, template management, export, the active task — as a flat stack of sections under Dashboard.
 
-1. **Keep the flat section list, restyled** — smallest change, but leaves the stated IA problem (Goals, bullet 2) unsolved. The decision recorded above was explicitly *styling **plus** IA*.
-2. **Tabbed navigation** — one concern at a time, scales to more surfaces. Rejected: it hides the day's timeline behind a tab, when reviewing the day is the dashboard's whole purpose, and it fragments a surface the user opens *to see everything at once*.
+1. **Keep the current split, restyled** — smallest change, but leaves the stated IA problem (Goals, bullet 2) unsolved. This feature's scope is *styling **plus** IA*, which is what Goals bullet 2 argues for and what makes styling-only insufficient.
+2. **Extend tabbed navigation to everything** — one concern at a time, scales to more surfaces. Rejected: applied to the timeline it would hide the day behind a tab, when reviewing the day is the dashboard's whole purpose, and it fragments a surface the user opens *to see everything at once*. Note this rejects **extending** the existing pattern, not introducing it — tabs already exist and the chosen option keeps a version of them.
 3. **One primary surface, with secondary concerns demoted.** **Chosen.** The Timeline — presented as the Timeline Editor and the History View — is the dashboard's subject and occupies its main area. Export sits adjacent to it, because exporting is what reviewing leads to. Template management and hotkey settings are **configuration**, not daily work, and move behind a settings surface. The active task gets persistent placement, because it is the one thing that must be true at a glance even here.
 
    Frequency, not category, drives the ordering: reviewed daily, exported daily, configured rarely.
 
+   **What is new here versus what already ships.** Hotkey bindings are already behind the Settings tab, so that half is done. The change is that **template management joins them** (today it sits in the Dashboard tab beside the day's work), that the Timeline becomes the Dashboard tab's *subject* rather than one section among several, and that export moves adjacent to it. Stated explicitly so this doc is not read as claiming credit for shipped behaviour.
+
 ### C. Theme mechanism
 
-Decision 3 above settled *light and dark, user-selectable, persisted*. How they are expressed is separate.
+Decision 5 above settled *light and dark, user-selectable, persisted*. How they are expressed is separate.
 
 1. **Two hand-authored stylesheets** — total control per theme, but every component is specified twice and they drift. Rejected.
 2. **Semantic design tokens with two value sets.** **Chosen.** Components reference *roles* (surface, text-primary, border, accent, danger), never raw colours; a theme is a set of values bound to those roles. The design system already ships tokens in this shape, so this is adopting its structure rather than inventing one. It also makes the third theme — high contrast, if ever needed — a value set rather than a rewrite.
-3. **OS-follow only, no in-app control** — fewer moving parts, but decision 3 explicitly chose a persisted user preference.
+3. **OS-follow only, no in-app control** — fewer moving parts, but decision 5 rejected it: one OS-wide bit cannot express two windows with different viewing conditions.
 
 ### D. Density and target sizing
 
 1. **One density everywhere** — simplest, but either the widget wastes its 260×90 or the dashboard is too tight for dragging.
-2. **Two named densities: `compact` (widget) and `comfortable` (dashboard).** **Chosen.** A single spacing scale with two step selections, not two scales. This is the mechanism by which A's "two postures, one system" is actually delivered, and it gives #14 a defined baseline to design drag targets against rather than inventing spacing.
+2. **Two named densities: `compact` (widget) and `comfortable` (dashboard).** **Chosen.** A single spacing scale with two step selections, not two scales. This is the mechanism by which A's "two postures, one system" is actually delivered.
+
+   **What this does and does not hand to #14.** It gives that work a named structure — one scale, two step selections — but this doc **does not yet state the scale's values or a minimum target size**, because the spacing tokens live in the design system and that artifact is not in this repository (see Technical Constraints). Until the values are recorded, #14 would still be inventing spacing, which is the failure this feature exists to prevent. **Importing the concrete steps is a prerequisite of implementing this feature**, not of accepting it. *(An earlier draft claimed a "defined baseline" was already delivered; it was not.)*
 
 ### E. Discoverability, given an expert sole user
 
@@ -145,7 +163,7 @@ Decision 3 above settled *light and dark, user-selectable, persisted*. How they 
 
 1. **Full WCAG AA conformance** — the right default for a shipped product, but this is a single-user tool for one known user, and conformance work not driven by a real need is scope this MVP has not paid for.
 2. **Nothing beyond defaults** — rejected: two requirements here are not accessibility niceties but *correctness*, because the record's meaning depends on them.
-3. **Contrast and non-colour encoding only.** **Chosen.** Two commitments, both because they materially affect interaction: text and meaningful boundaries meet **AA contrast in both themes**, and **no state is encoded by colour alone** — `SystemInferred` ends, reconstructed blocks, and the eight project hues must each carry a second channel (shape, weight, icon, or label). Everything else — full keyboard traversal of every control, screen-reader labelling, reduced-motion — is deferred, not refused.
+3. **Contrast and non-colour encoding only.** **Chosen.** Two commitments, both because they materially affect interaction: text and meaningful boundaries meet **AA contrast in both themes**, and **no state is encoded by colour alone** — `SystemInferred` ends, reconstructed blocks, and project hues must each carry a second channel (shape, weight, icon, or label). *(This previously said "the eight project hues." No accepted doc, and nothing in this repo, establishes a palette of eight; the figure was unsourced and is withdrawn. The palette's size is an open input — see Technical Constraints.)* Everything else — full keyboard traversal of every control, screen-reader labelling, reduced-motion — is deferred, not refused.
 
    The non-colour rule is a *correctness* requirement: if an inferred end or a reconstructed block is distinguishable only by hue, the record's honesty depends on the viewer's colour perception and on the theme.
 
@@ -164,13 +182,25 @@ Owned by the ux-designer. This section defines the **system**, not the screens; 
 
 - **Component set, scoped to what the two surfaces actually use**: button (primary/secondary/danger), icon button, text input, select, toggle, tag/chip, card/section, dialog, and inline status. Built in Svelte from the design system's JSX as reference spec, per decision 2 — not ported wholesale, and not built ahead of need.
 - **The widget's constrained subset**: current task name, elapsed time, stack depth, and state. `compact` density, no chrome, no controls that require aiming. It must stay legible at a glance from across a desk, and it may not grow beyond 260×90.
+
+  **The widget needs its own edge treatment in light theme, and this is where that is decided.** It is `decorations: false`, `shadow: false`, `alwaysOnTop: true` (`tauri.conf.json:26-31`), and today it is a translucent dark panel (`widget/+page.svelte:56`, `rgba(20,20,20,0.92)`) floating over arbitrary application windows. Dark-on-anything reads as a distinct object; **light-on-anything does not** — a pale panel over a pale editor has no boundary at all, and neither `decorations` nor `shadow` is available to supply one. So: **in light theme the widget carries an explicit 1px border in a token that meets AA contrast against both light and dark backdrops**, and keeps its translucency in dark theme where the contrast already does the work. Without this rule "both themes are first-class" is false for the surface that spends all day over other applications.
+
+  **The theme control is not on the widget.** It has no controls that require aiming, and theme is set roughly once — it belongs on the dashboard's settings surface.
 - **The dashboard**: the Timeline as the primary surface, export adjacent, active task persistently placed, configuration behind a settings surface. `comfortable` density throughout.
 
   "The Timeline" here means the *data*, not any particular view of it — so this IA is **implementable today with only the History View**, and the Timeline Editor slots into the same primary area when #14 lands. The redesign must not assume the Editor exists, or it cannot ship before the thing it is meant to enable.
 - **Timestamps in monospace**, everything else in the humanist body face — the design system's rule, and it earns its place here: scanning a column of times is the History View's main reading task.
 - **Per-project hue** from the persisted mapping (decision 3), applied as an accent on tags — never as the sole carrier of meaning, and never near the accent colour used for interactive state.
-- **Two states must be visually distinct in both themes and without relying on colour**: an end that is `SystemInferred`, and a block whose `CaptureOrigin` is manual or adjusted. Both are commitments this project has already made in `interruption-stack.md` and `timeline-reconstruction.md`; the redesign is where they become real.
-- **Motion**: the design system leaves it unspecified. Adopt one rule — 150–200ms ease-out for state changes, nothing decorative, nothing that delays a capture action.
+- **Three things must be visually distinct in both themes and without relying on colour**, on **two independent channels** — not one combined "this block was touched" mark:
+
+  1. an end that is `SystemInferred` rather than `UserDetermined`;
+  2. **origin** — whether the block was live-captured or manually entered;
+  3. **adjusted-ness** — whether it has since been edited.
+
+  *(Corrected 2026-08-01. This previously required one mark for "manual **or** adjusted", which would satisfy the letter of the rule while making `ManualEntryAdjusted` and `LiveCaptureAdjusted` indistinguishable. `timeline-reconstruction.md` is explicit that origin and adjusted-ness are preserved **independently** — "a manually entered block nudged once must stay distinguishable from a live capture that needed correcting" — so collapsing them is precisely the provenance loss F.3 calls a correctness failure rather than an accessibility one.)*
+
+  The commitments come from `interruption-stack.md` and `timeline-reconstruction.md`; the redesign is where they get a visual form. **Partly real already**: `+page.svelte:589-590, 692-699` renders an inferred end in italic — non-colour by deliberate choice, with a comment saying so. That is the existing precedent to extend, not replace.
+- **Motion**: the design system leaves it unspecified. Adopt one rule — 150–200ms ease-out for state changes, nothing decorative, nothing that delays a capture action. **The duration is provisional and unvalidated** (`principles.md` #7): it is a conventional default, not a measured one. **Revisit if** any animation is perceptible as lag on a capture action, or if #14's drag feedback needs a different response curve — in which case the drag case gets its own value rather than this one being stretched to cover it.
 
 **Deferred to #14, not decided here**: drag affordances and hit targets, how a clamp is visually communicated, undo presentation, zoom and time-range controls, minimum rendered block size, and orientation. This doc gives that work a spacing scale, a density baseline, and a component set to build from.
 
@@ -178,10 +208,17 @@ Owned by the ux-designer. This section defines the **system**, not the screens; 
 
 Owned by technical-architect / senior-software-engineer.
 
+- **The design system is not in this repository, and three decisions depend on it.** Decision 2 names `components/**/*.jsx` and `tokens/colors.css` / `spacing.css` / `typography.css`; the three-font constraint below, C.2's "the design system already ships tokens in this shape," D.2's spacing steps, and the project-hue palette all rest on it. Nothing under this repo root contains any of it, so **none of those claims is currently reproducible by anyone but the author.** *(Raised 2026-08-01.)* **Before implementation begins**, the system's location and version must be recorded here, and the three things this doc needs from it — the spacing scale's steps, the palette and its size, the font weights actually used — copied into this doc so the design survives the artifact moving or changing.
 - **Fonts must be bundled, not fetched.** The system specifies three families (Familjen Grotesk, Hanken Grotesk, JetBrains Mono); a Tauri desktop app has no guaranteed network. Three families is a real binary-size cost against [ADR 0002](../../decisions/0002-desktop-app-framework-and-platform.md), which chose Tauri partly for size — so **subset the bundled weights to those actually used**, and treat dropping to two families as a live option if the cost proves material. Tracked as `docs/risks.md` **R13**.
 - **`csp: null` in `tauri.conf.json` is a scaffold default, not a decision.** Noted here because the font decision surfaces it — bundling locally removes the main reason to relax CSP — but **this redesign does not own it and it should not wait for it.** It is a live security posture in shipped config, tracked as `docs/risks.md` **R13**, and fixable independently today.
 - **Components may not reference raw colour values.** Every colour resolves through a semantic token, or the second theme breaks silently and inconsistently. This is the one constraint whose violation is invisible until someone switches themes.
-- **The theme preference persists** alongside hotkey bindings and export settings in `settings.json` — the existing durable-settings path, not a new mechanism.
+- **The theme preference persists** in its own `theme.json`, following the pattern the other settings already use.
+
+  *(Corrected 2026-08-01. This previously said "alongside hotkey bindings and export settings in `settings.json` — the existing durable-settings path, not a new mechanism." **There is no such shared path.** `paths.rs:7-29` resolves four separate files: `settings.json` holds only `HotkeyBindings`, `export_settings.json` holds `ExportSettings`, plus `templates.json` and `transitions.jsonl`. The accepted `docs/architecture/constraints.md` carries the same error and is corrected in the same pass.)*
+
+  **Why a fourth settings file rather than consolidating.** Consolidation is the tidier end state and was the alternative considered. It is rejected **for this feature**: the two existing stores have materially different lifecycles — hotkeys are read once at startup, export settings are live-mutable through `ExportSettingsState` — so merging them is a change to shipped, working persistence code, made by a presentation-layer feature, in service of tidiness. That violates this doc's own "no behavioural change" constraint below and `principles.md`'s smallest-correct-change discipline. A separate file matches the established pattern exactly and costs one `paths.rs` function.
+
+  **If consolidation is wanted, it is its own piece of work** and should be sequenced deliberately rather than absorbed here. Recorded so the fragmentation is a knowing choice rather than an accreted one.
 - **The project→hue mapping is presentation-only.** It must never become an export aggregation key: export groups by exact name/project/client, and adding a field would silently change billed totals (`docs/risks.md` R2).
 - **No behavioural change.** No transition type, no persisted timeline data, and no export output changes. If a visual requirement appears to need one, that is a signal to stop and raise it, not to make it.
 - **`app/src/routes/+page.svelte` is classified binary by git** — two NUL bytes used deliberately as a delimiter in an `R.uniqBy` grouping key — so it gets no textual diffs or line-level merges, on the largest file this feature will rewrite. Separable; the rewrite may resolve it by choosing a delimiter that isn't NUL.
@@ -193,12 +230,21 @@ Owned by technical-architect / senior-software-engineer.
 - Both themes are complete: switching produces no unstyled, invisible, or illegible element on either surface.
 - The theme preference survives an app restart, persisted alongside hotkey and export settings.
 - Text and meaningful boundaries meet WCAG AA contrast **in both themes** — checked, not assumed.
-- A `SystemInferred` end and a manual or adjusted `CaptureOrigin` are each distinguishable **with colour removed**, in both themes.
-- Two project hues that are adjacent on the palette remain distinguishable from each other, and neither is confusable with the interactive accent.
-- The mini widget renders correctly at exactly 260×90 with no scrolling, clipping, or overflow, and remains legible with strings ~40% longer than their English equivalents (`ideas/multi-language-ui-support.md`).
-- Every frequent dashboard action displays its hotkey inline; every infrequent one is visibly labelled and reachable by pointer.
+- A `SystemInferred` end is distinguishable **with colour removed**, in both themes.
+- Origin and adjusted-ness are distinguishable **independently and with colour removed**: all four of `LiveCapture`, `LiveCaptureAdjusted`, `ManualEntry` and `ManualEntryAdjusted` are told apart from one another, not merely separated into touched and untouched.
+- The project→hue mapping survives an app restart, and a project string with no mapping is assigned the next unused hue rather than sharing one.
+- The Timeline occupies the dashboard's primary area, with export adjacent to it and the active task persistently placed; template management and hotkey bindings are reachable but do not occupy that area.
+- Both densities resolve from a single spacing scale — `compact` and `comfortable` select different steps of the same scale, and no component hard-codes a spacing value outside it.
+- Timestamps render in the monospace face on both surfaces; no other content does.
+- The widget displays current task name, elapsed time, stack depth and state, and nothing else.
+- State-change animations complete within the adopted motion rule, and no animation sits between a capture action and its visible result.
+- Every pair of project hues in the palette is distinguishable from every other, and no hue is confusable with the interactive accent — checked across the whole palette rather than only between neighbours, since the mapping is user-assigned and any two projects can end up side by side.
+- The mini widget renders correctly at exactly 260×90 with no scrolling, clipping, or overflow, and its text areas are sized so that a **German** rendering of each label fits without clipping — the concrete thing `ideas/multi-language-ui-support.md` asks of this redesign whether or not translation is ever built, since the window is `resizable: false` and cannot be grown later. *(The "~40% longer" figure this criterion previously cited appears nowhere in that document; it was invented. Testing against the actual longest supported language is both truer and easier to check.)*
+- Every dashboard action classified **frequent** displays its hotkey inline; every action classified **infrequent** is visibly labelled and reachable by pointer. E.3 states the rule but never applies it, so the classification is fixed here: **frequent** — Start, Switch, Interrupt, Return Previous, Return Original, Complete, Rename (the seven that have or warrant bindings); **infrequent** — export range and rounding, template create/edit/delete, hotkey rebinding, theme selection, project hue assignment. Drawing the line in the design rather than during implementation is the point of having the rule.
 - Configuration (templates, hotkey bindings) is reachable from the dashboard without occupying its primary surface.
-- A full Switch/Interrupt/Return cycle takes no additional interaction step compared to before the redesign — measured against `docs/vision/vision.md`'s Capture Latency target, which the redesign must not regress.
+- A full Switch/Interrupt/Return cycle performed **on the dashboard** takes no additional interaction step compared to before the redesign, and the **hotkey and widget paths are untouched** — no markup, handler, or command on either changes.
+
+  *(Split 2026-08-01 from a criterion that conflated two things and tested the wrong surface. It asserted a step count but claimed to measure it "against `vision.md`'s Capture Latency target" — Capture Latency is a **time**, inclusive of the durable write, which `vision.md` itself records as not measured and which a presentation-layer change cannot move. It also named the primary capture path, which runs through hotkeys and the widget; `widget/+page.svelte` is display-only, so a click-driven capture cycle exists solely on the dashboard — the surface capture-first deliberately de-prioritises. What the redesign can actually guarantee is that it does not touch the fast path at all.)*
 - No transition type, stored Time Block, or export output differs before and after the redesign, proven by an unchanged export from identical input.
 
 ---
