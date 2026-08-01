@@ -147,6 +147,8 @@ Both the namespace and the encoding are fixed here rather than deferred to imple
 
 **What makes them a durable contract is a decision this ADR does not make.** They are permanent only if reconstruction payloads carry the derived *UUID*. If a payload carried the *`seq`* instead, the derivation would stay purely in-memory and remain changeable, and the log would stay readable by eye — one of the two axes ADR 0004 chose JSONL on. This ADR assumes the UUID because `TimeBlock.id` already is one and the frontend already types it as such, but that is a consequence of an existing field, not an argument. **The choice belongs to whichever design specifies the reconstruction payloads**, and it should be made deliberately there rather than inherited from here.
 
+**It has since been made there** — [`timeline-reconstruction.md`](../product/features/timeline-reconstruction.md), alternative F: payloads carry the derived `Uuid`. So the namespace and encoding above *are* a permanent on-disk contract from the first reconstruction transition written, and that doc records the loss of future freedom as a knowing cost rather than inheriting it silently. Noted here rather than argued here: the reasoning belongs to the design that owns the payloads.
+
 ### Scope of the guarantee — and an explicit non-goal
 
 **A Time Block's identity is stable within a single append-only log lineage. This ADR does not provide globally unique identities across unrelated Anchor histories. Global uniqueness is explicitly a non-goal** unless a future accepted requirement establishes one.

@@ -2,14 +2,16 @@
 status: draft
 date: 2026-07-29
 owner: erich
-related: [docs/vision/vision.md, docs/concept/concept.md, docs/product/users.md, docs/product/mvp.md, docs/principles.md, docs/risks.md, docs/glossary.md, docs/product/features/interruption-stack.md, docs/product/features/export.md, docs/decisions/0004-transition-log-format-and-torn-write-scheme.md, docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md, ideas/manual-time-block-entry.md]
+related: [docs/vision/vision.md, docs/concept/concept.md, docs/product/users.md, docs/product/mvp.md, docs/principles.md, docs/risks.md, docs/glossary.md, docs/product/features/interruption-stack.md, docs/product/features/export.md, docs/decisions/0004-transition-log-format-and-torn-write-scheme.md, docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md, docs/decisions/0006-stable-persistent-time-block-identity.md, docs/assumptions.md, ideas/manual-time-block-entry.md]
 ---
 
 # Timeline Reconstruction
 
-> Design pass for GitHub issue #15. Follows `.claude/workflows/design.md`. Resolves ADR 0005 open items 1–4. **Not yet reviewed** — `status: draft` until an independent reviewer pass finds no must-fix items.
+> Design pass for GitHub issue #15. Follows `.claude/workflows/design.md`. Resolves ADR 0005 open items 1–4, and the reconstruction-payload question [ADR 0006](../../decisions/0006-stable-persistent-time-block-identity.md) delegates to this doc (alternative F). `status: draft` until an independent reviewer pass finds no must-fix items.
 >
 > Depends on the **Timeline Editor** (#14) for the surface these operations happen on, and that in turn on the visual redesign as enabling work. This doc specifies *what the operations mean*, not what the editor looks like.
+>
+> **Depends on [ADR 0006](../../decisions/0006-stable-persistent-time-block-identity.md) for persistent Time Block identity.** Four of the five operations name a block that already exists, from a session that may be days later — the first requirement in Anchor for a reference that survives a restart. That ADR decides how identity is derived and what it guarantees; this doc states only what reconstruction *needs* from it and does not restate the derivation.
 
 ## Problem
 
@@ -43,7 +45,7 @@ Serves the single primary persona in `docs/product/users.md` — the interrupted
 A block entered at 16:00 covering a 09:00 span is logged *after* work that happened later. Log order and chronological order stop agreeing.
 
 1. **Re-sort the log so it stays chronological** — keeps one ordering, but destroys the append-only property that all of [ADR 0004](../../decisions/0004-transition-log-format-and-torn-write-scheme.md)'s crash-safety rests on. Rejected outright.
-2. **Insert reconstruction transitions with a synthetic `seq`** placing them "where they belong" — preserves apparent chronology in the log, but breaks the monotonic sequence the watermark-based replay filter depends on. Rejected.
+2. **Insert reconstruction transitions with a synthetic `seq`** placing them "where they belong" — preserves apparent chronology in the log, but breaks the monotonic sequence the watermark-based replay filter depends on. Rejected. *(Since [ADR 0006](../../decisions/0006-stable-persistent-time-block-identity.md), this option is worse than it was when rejected: `seq` is now also the input to block identity, so a synthetic `seq` would collide with an existing block's id. The original reason stands on its own; this simply removes any temptation to revisit it.)*
 3. **Two orderings, each authoritative in its own domain.** **Chosen.** Log order (`seq`) remains authoritative for **replay** — unchanged, ADR 0004 untouched. Block `start` is authoritative for **display and export**. Reconstruction breaks only the *coincidence* that the two used to agree; neither ordering changes meaning.
 
 ### B. Overlap policy
@@ -59,6 +61,8 @@ Capture can never produce overlapping blocks — Anchor tracks one active task a
 ### C. Editing blocks that a live interruption stack frame still references
 
 A stack frame is *an unresolved obligation to record the outcome of interrupted work*. It holds `paused_time_block_id` — the only link back — plus its own copy of the paused task's name/project/client for the return path.
+
+   **That reference is not the same kind of reference reconstruction needs**, and conflating them would misread what [ADR 0006](../../decisions/0006-stable-persistent-time-block-identity.md) changed. `paused_time_block_id` is created and consumed *within one replay*: the frame and the block it points at are both rebuilt from the same log in the same pass, so the link holds even when ids are regenerated per replay. A reconstruction transition is the opposite — it is **written** in one session naming a block **built** in another. Stable identity is what makes the second kind possible; the first never needed it.
 
 1. **Allow all operations, cascading changes into the frame** — most permissive, but deleting a block orphans its frame, and replay then fails with `PausedBlockNotFound`. Corrupting replay to allow an edit is not a trade worth making. Rejected.
 2. **Forbid all editing until the frame is resolved** — safest, but a task interrupted this morning and not yet returned to cannot have its `Anchor N` name corrected all day. That is the R8 case, made worse. Rejected.
@@ -93,14 +97,23 @@ Each operation must survive [`principles.md`](../principles.md) #1 — a stated 
 
 **Move was scrutinised specifically**, since two Resize operations can reach the same end state. It survives because it expresses a different intent and a different problem: Resize says *the timing was wrong*, Move says *the duration was right and the position was wrong*. Reaching it by resizing both edges would transiently change the duration to something the user never claims — the operation would misrepresent itself mid-gesture. "Dragging a block feels natural on a timeline" was explicitly **not** accepted as justification.
 
+### F. What a reconstruction payload names its target block by
+
+Move, Resize, Edit Identity and Delete all act on a block that already exists. [ADR 0006](../../decisions/0006-stable-persistent-time-block-identity.md) makes a block referenceable across restarts by deriving `id` from the `seq` of the transition that created it — and then explicitly **declines to decide which of the two the payload should carry**, on the grounds that the choice belongs to whichever design specifies those payloads. This is that design, so it is decided here.
+
+1. **Carry the derived `Uuid`.** **Chosen.** `TimeBlock.id` is already a `Uuid`, the frontend already types it, and the editor selects *a block* — so the value it has in hand is the id. Nothing has to be resolved at write time, and a reference means the same thing whether it is read by replay, by a test, or by a human.
+2. **Carry the `seq` instead**, deriving the id in memory only. Genuinely attractive: it keeps the derivation a private implementation detail that could still be changed, and it keeps a reconstruction line legible by eye against the line it targets — one of the two axes ADR 0004 chose JSON Lines on. Rejected because it makes every reference a *derivation* rather than a value: the editor holds a `Uuid` and would have to invert it back to a `seq` to write a payload, and the log would then carry two spellings of the same reference depending on which side you read from. The legibility gain is also smaller than it looks — the id is a UUIDv5 over the decimal `seq`, so a reader with the namespace can reproduce it; only an unassisted reader loses.
+
+**The cost of choosing 1 is stated plainly:** it makes ADR 0006's namespace and encoding a permanent on-disk contract from the first reconstruction transition ever written, rather than a changeable in-memory detail. That is a real loss of future freedom, accepted deliberately — a reference that has to be computed before it can be compared is the kind of indirection that is cheap to add and expensive to live with.
+
 ## Trade-offs
 
-| | Ordering | Overlap | Live-frame editing | Rename vs. Edit Identity | Operation set |
-|---|---|---|---|---|---|
-| **Chosen** | Two orderings, each authoritative in its domain | Collision clamping; no overlaps ever persisted | Three tiers by block state | Two transitions, shared implementation | Add, Move, Resize, Edit Identity, Delete |
-| Complexity | Low — no format change; one display defect to fix | Moderate — clamping must be computed in the domain and mirrored in the editor | Moderate — identity edits must propagate to the frame | Low — second transition, same validation core | Low — five bounded operations |
-| Reversibility | High — display ordering can change without touching stored data | Moderate — permitting overlaps later is additive; *forbidding* them later would not be | High — tiers can loosen without a data change | Low — merging them later supersedes a shipped transition | High — an operation can be added later with its own problem statement |
-| Risk if wrong | Full-fidelity JSON emits non-chronologically, quietly | An overlap that reaches export inflates a billed total invisibly (**R2** shape) | A deleted open-frame block breaks replay outright (`PausedBlockNotFound`) | Two transitions for one fact reads as redundancy to a newcomer | An operation without a real problem accretes semantics forever (the split/merge lesson) |
+| | Ordering | Overlap | Live-frame editing | Rename vs. Edit Identity | Operation set | Target reference |
+|---|---|---|---|---|---|---|
+| **Chosen** | Two orderings, each authoritative in its domain | Collision clamping; no overlaps ever persisted | Three tiers by block state | Two transitions, shared implementation | Add, Move, Resize, Edit Identity, Delete | Payloads carry the derived `Uuid`, not the `seq` |
+| Complexity | Low — no format change; one display defect to fix | Moderate — clamping must be computed in the domain and mirrored in the editor | Moderate — identity edits must propagate to the frame | Low — second transition, same validation core | Low — five bounded operations | Low — the value is already in hand on both sides |
+| Reversibility | High — display ordering can change without touching stored data | Moderate — permitting overlaps later is additive; *forbidding* them later would not be | High — tiers can loosen without a data change | Low — merging them later supersedes a shipped transition | High — an operation can be added later with its own problem statement | **Lowest of the six** — it makes ADR 0006's namespace and encoding a permanent on-disk contract from the first such line written |
+| Risk if wrong | Full-fidelity JSON emits non-chronologically, quietly | An overlap that reaches export inflates a billed total invisibly (**R2** shape) | A deleted open-frame block breaks replay outright (`PausedBlockNotFound`) | Two transitions for one fact reads as redundancy to a newcomer | An operation without a real problem accretes semantics forever (the split/merge lesson) | Changing the derivation afterwards silently re-points every stored reference |
 
 ## UX
 
@@ -112,6 +125,8 @@ Owned by the ux-designer; the Timeline Editor's visual form belongs to #14, not 
 - **Move / Resize** — direct manipulation, **clamped at neighbouring boundaries**. The clamp must be *visible*: the block stops at the boundary and the boundary itself indicates it is the limit. A user who drags harder must understand why nothing more is happening — a silent clamp reads as a broken UI.
 - **Edit Identity** — same fields and autocomplete as Rename, on a historical block.
 - **Delete** — no confirmation dialog *provided undo exists*. As written that is a circular dependency: this doc justified skipping confirmation by calling delete reversible, while deferring undo to the Timeline Editor (#14). **Resolved here as a hard prerequisite** — #14 must provide undo, or delete gains a confirmation step. Deleting a Time Block is destroying a billing record; it may not be both unconfirmed and irreversible.
+
+  **Undo is not free architecturally, and #14 inherits that.** [ADR 0006](../../decisions/0006-stable-persistent-time-block-identity.md) records the tension it opens: an undo transition either re-creates the block under its **original** id — making identity no longer derive purely from the creating transition's `seq` — or creates one under a **new** id while carrying the deleted block's full prior state, which is the replacement-state shape that ADR rejected. Neither is free, ADR 0006 deliberately does not choose, and settling it may require revisiting that ADR. This doc's prerequisite is therefore a claim on #14's *design* budget, not only its implementation budget.
 - **Reconstructed and adjusted blocks are visually marked**, permanently, from `CaptureOrigin`. This is the same principle as surfacing `SystemInferred` ends distinctly: the record must never let reconstructed work pass as captured work.
 - **Nothing prompts.** Reconstruction is always user-initiated. Anchor never suggests that a gap "looks like" untracked work — that would be idle detection, which `docs/vision/vision.md` puts out of scope and [ADR 0001](../../decisions/0001-manual-assisted-tracking-for-mvp.md) rules out.
 
@@ -120,7 +135,15 @@ Owned by the ux-designer; the Timeline Editor's visual form belongs to #14, not 
 Owned by technical-architect / senior-software-engineer. Implementation is gated on ADR 0005's remaining items being specified there — this section states what the design requires of them.
 
 - **New transitions carrying explicit times.** Every existing `TransitionPayload` variant derives its block boundaries from *when the transition was logged*; reconstruction needs variants carrying an author-chosen start and end. Additive to ADR 0004's schema, in the same way `Rename` was.
-- **Log order stays authoritative for replay.** No reordering, no synthetic sequence numbers. ADR 0004 is unaffected. What must change is any code assuming `closed` is chronological.
+- **A block reference that survives a restart** — supplied by [ADR 0006](../../decisions/0006-stable-persistent-time-block-identity.md), and the single hardest requirement this feature places on the architecture. Move, Resize, Edit Identity and Delete each name a block created in an earlier session, so a `Uuid` regenerated on every replay cannot serve; the payload carries the derived id per alternative F. What reconstruction requires of that identity, and nothing more:
+
+  - it is **the same value on every replay of the same log**, so a reference written on Tuesday resolves on Friday;
+  - it is **unique within the log**, so a reference resolves to exactly one block;
+  - it is **assigned to every block the log has ever produced**, so history is addressable back to the first line rather than from some cut-over point onward.
+
+  How those hold is ADR 0006's to state, not this doc's. Two of its consequences are worth naming here because they land on reconstruction directly: the guarantee is scoped to **one log lineage** (assumption **A13** — a restored backup or a second install reuses ids for unrelated work, which is accepted because nothing exports or consumes an id), and it rests on the invariant that **a transition creates at most one Time Block**. Reconstruction satisfies that invariant as designed — Add creates one block, the other four create none, and the overlap policy is clamping rather than splitting — but it is a constraint on any *future* operation added here, not a fact to be assumed.
+- **Deleting a block does not free its identity.** The transition that created it stays in the log, so its `seq` is never reissued and its id is never reused by a later block. Nothing in reconstruction may depend on the reverse.
+- **Log order stays authoritative for replay.** No reordering, no synthetic sequence numbers. ADR 0004's record format, checksum framing and watermark are unaffected (its *snapshot* payload is not — see below). What must change is any code assuming `closed` is chronological.
 - **Full-fidelity JSON export must sort by `start`.** It currently emits in `closed` order, which stops being chronological the moment a block is inserted. The History View already sorts by `start` and needs no change. *(Defect found during this design pass; not previously recorded.)*
 - **The editor clamps; the domain rejects.** These are deliberately different mechanisms for one invariant. Clamping is a *usability* device: it keeps the gesture from ever producing an overlap, so the user is never told "no." Rejection is the *guarantee*: the state machine refuses an overlapping result regardless of caller, because a UI-only invariant is one bug — or one non-editor caller — away from an overlapping billing record. A correctly working editor should never trigger the rejection.
 - **Identity edits on an open-frame block must update the frame's copy** of name/project/client atomically with the block, or the return path resumes under a stale identity.
@@ -132,12 +155,17 @@ Owned by technical-architect / senior-software-engineer. Implementation is gated
   **This is the R9 case working correctly, and it must not be left implicit.** Correcting a wrongly inferred end is the headline reason this feature exists; if the block stayed `SystemInferred` afterwards, the record would permanently claim Anchor inferred a time the user actually determined — and the distinct visual treatment `interruption-stack.md` requires for inferred ends would keep flagging a block the user has already fixed.
 - **Collision rules apply to Add, not only to Move and Resize.** A new block's **start point must fall in free space**; its end clamps at the next occupied boundary. Drawing a span across an existing block therefore yields a block ending where that block begins, rather than an overlap or a rejection. Beginning a draw *inside* an existing block has no free space to occupy and is not a valid start.
 - **The active block is a collision boundary whose end is `now`.** Unlike every other neighbour it has no fixed end, so its occupied span grows as the drag proceeds. Two consequences: the editor must render it as occupied up to the present moment, and **the domain must re-evaluate the collision at commit time, not trust a boundary computed when the gesture began.** In practice this means reconstruction can never place work inside the span Anchor believes is currently being tracked — which is correct: per the record, the user was doing the active task.
-- **Snapshot compatibility**: reconstruction transitions are ordinary log records and must survive compaction's watermark replay like any other. No new requirement beyond ADR 0005's existing snapshot-payload guarantee.
+- **Snapshot compatibility**: reconstruction transitions are ordinary log records and must survive compaction's watermark replay like any other.
+
+  **This does place a new requirement on the snapshot**, and an earlier draft of this doc wrongly said it did not — it claimed nothing was needed beyond ADR 0005's payload guarantee, which covers unresolved stack frames (assumption **A10**) and says nothing about identity. Blocks below the watermark are never replayed, so after a compaction their ids can come only from the snapshot. If it omits them, every block older than the watermark becomes unaddressable and reconstruction silently loses reach over exactly the history most likely to need correcting. [ADR 0006](../../decisions/0006-stable-persistent-time-block-identity.md) makes persisting each block's `id` (or the `seq` it derives from) a normative snapshot requirement; assumption **A14** records it alongside A10 so a future snapshot implementer finds the whole payload contract in one place. Compaction is unimplemented (#8), so this is a constraint on work not yet done rather than a defect in shipped code.
 
 ## Acceptance Criteria
 
 - Adding a block for a past span creates a Time Block with `CaptureOrigin::ManualEntry`, and it appears in the History View ordered by its `start`, not by when it was entered.
-- After adding a block covering an earlier span than existing blocks, replaying the log from disk reproduces the identical timeline — proving log order remained authoritative for replay while `start` governs display.
+- After adding a block covering an earlier span than existing blocks, replaying the log from disk reproduces the identical timeline — **including every block's `id`** — proving log order remained authoritative for replay while `start` governs display.
+- A reference to a block, written by a reconstruction transition in one session, still resolves to that same block after the app is restarted and the log replayed from scratch. This is the criterion ADR 0006 exists to satisfy; before it, the reference resolved only within the session that wrote it.
+- Editing a block that was created **before** the identity scheme was in place succeeds — history is addressable to the first line of the log, with no cut-over generation of blocks that cannot be reconstruction targets.
+- No two blocks in a replayed timeline share an `id`. Asserted explicitly rather than assumed: `resolve_paused` and `derived_status` use `id` as a lookup key, so a collision resolves the wrong block silently instead of failing.
 - Full-fidelity JSON export emits records in ascending `start` order, including after a block has been inserted covering an earlier span.
 - Resizing a block toward a neighbour stops exactly at the neighbour's boundary; continuing the gesture produces no further change, no overlap, and no modification to the neighbour.
 - Moving a block preserves its duration exactly, and clamps at a neighbouring boundary without altering that neighbour.
