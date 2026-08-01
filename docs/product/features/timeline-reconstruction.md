@@ -1,5 +1,5 @@
 ---
-status: draft
+status: accepted
 date: 2026-08-01
 owner: erich
 related: [docs/vision/vision.md, docs/concept/concept.md, docs/product/users.md, docs/product/mvp.md, docs/principles.md, docs/risks.md, docs/glossary.md, docs/architecture/constraints.md, docs/product/features/interruption-stack.md, docs/product/features/export.md, docs/decisions/0001-manual-assisted-tracking-for-mvp.md, docs/decisions/0004-transition-log-format-and-torn-write-scheme.md, docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md, docs/decisions/0006-stable-persistent-time-block-identity.md, docs/assumptions.md, ideas/manual-time-block-entry.md]
@@ -7,7 +7,9 @@ related: [docs/vision/vision.md, docs/concept/concept.md, docs/product/users.md,
 
 # Timeline Reconstruction
 
-> Design pass for GitHub issue #15. Follows `.claude/workflows/design.md`. Resolves ADR 0005 open items 1–4, and the reconstruction-payload question [ADR 0006](../../decisions/0006-stable-persistent-time-block-identity.md) delegates to this doc (alternative F). `status: draft` until an independent reviewer pass finds no must-fix items.
+> Design pass for GitHub issue #15. Follows `.claude/workflows/design.md`. Resolves ADR 0005 open items 1–4, and the reconstruction-payload question [ADR 0006](../../decisions/0006-stable-persistent-time-block-identity.md) delegates to this doc (alternative F). **`status: accepted` 2026-08-01**, after an independent review that found no architectural blockers and six must-fixes, all applied.
+>
+> **Accepted is not ready to implement.** Three things gate that, none of them design questions: ADR 0006's risk **R14** (a `seq` consumed by an append that did not durably complete) must be closed in the writer first, since under that ADR a duplicate `seq` is silent identity corruption; the Timeline Editor (#14) owes Add/Move/Resize a surface *and* owes undo a decision that may reopen ADR 0006; and the compaction snapshot (#8) must carry block ids or reconstruction loses reach over pre-watermark history.
 >
 > Depends on the **Timeline Editor** (#14) for **Add, Move and Resize** — the operations that need a spatial surface — and that in turn on the visual redesign as enabling work. This doc specifies *what the operations mean*, not what the editor looks like.
 >

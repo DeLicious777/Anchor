@@ -1,13 +1,17 @@
 ---
-status: draft
-date: 2026-07-29
+status: accepted
+date: 2026-08-01
 owner: erich
 related: [docs/decisions/0004-transition-log-format-and-torn-write-scheme.md, docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md, docs/product/features/timeline-reconstruction.md, docs/product/features/interruption-stack.md, docs/product/features/export.md, docs/architecture/constraints.md, docs/principles.md, docs/risks.md, docs/assumptions.md, docs/glossary.md]
 ---
 
 # 0006: Stable, Persistent Time Block Identity
 
-> `status: draft`. This is the architectural prerequisite for timeline reconstruction (#15) — that feature cannot be accepted or implemented until this is settled.
+> **`status: accepted` 2026-08-01**, after two independent review cycles (summarised below) and a third that reviewed the feature consuming it. This was the architectural prerequisite for timeline reconstruction (#15); that feature is accepted alongside it.
+>
+> **What acceptance commits to.** `ANCHOR_NAMESPACE` and the ASCII-decimal encoding of `seq` are now a durable contract, not a changeable implementation detail — `timeline-reconstruction.md`'s alternative F decided that reconstruction payloads carry the derived `Uuid`, so the first such transition ever written freezes both. Changing either afterwards would orphan every stored reference and leave the app unable to start. **Per this repository's ADR convention, a reversal is a new ADR superseding this one — never an edit here.**
+>
+> **One prerequisite is not yet met.** Risk **R14** — a `seq` consumed by an append that did not fully and durably complete — remains open in `log/writer.rs`. Accepting this ADR does not close it; the Follow-up work section marks it a prerequisite of *implementation*, not of acceptance. Implementation of #15 must not begin while it stands, because a duplicate `seq` under this scheme is silent identity corruption rather than an obscure I/O edge.
 >
 > **Revised 2026-07-29 after its own independent review.** The decision — derive identity from the creating transition's `seq` — was upheld; three things were not. The review's strongest objection was that a fixed namespace over `seq` gives no *global* uniqueness. Investigating that against accepted project material established that **global uniqueness is not a requirement of this project at all**: `export.md` does not specify an `id` field, the billing path never carries one, multi-user and sync are explicitly out of scope, and no ADR states an identity requirement. The objection was therefore **reframed, not accepted** — the defect was this document overclaiming in Consequences, not the derivation. See the Decision's non-goal, and option G.
 >
