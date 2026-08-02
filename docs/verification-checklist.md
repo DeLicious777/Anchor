@@ -94,12 +94,44 @@ Watch: the edit resolves against the right block and survives. This is the one s
 
 ---
 
+## Concluding the pass
+
+Every run ends in exactly one of three outcomes. Record it — a pass without a recorded conclusion is indistinguishable from a run nobody finished.
+
+### 🟢 Pass — all fourteen steps succeeded
+
+Record **date, commit SHA, OS and build version**, plus anything unusual about the environment (timezone, DST boundary, non-English locale, unusual display scaling). The environment matters because several invariants here are timezone- or clock-sensitive: `next_default_name` resets on *local* midnight, and gap recovery compares instants across a shutdown.
+
+This is the artifact that makes future failures interpretable. Without a dated clean run, a later failure raises "did this ever work?"; with one, it is a **regression against a known-good commit**, which is a far cheaper question to answer.
+
+### 🟡 Finding — one or more steps failed, but data integrity is intact
+
+Finish the remaining steps if it is safe to do so — a single pass often surfaces more than one thing, and stopping early wastes the setup. Then open an issue per finding, link it here, and classify each one:
+
+- **Implementation evidence** — an accepted document claims behaviour the application does not have, or vice versa. Amend the document from the evidence; do **not** work around it in code (`.claude/docs-standards.md`, "Treating accepted decisions during implementation").
+- **Product bug** — the documents and the code agree, and the behaviour is simply wrong. Fix the code.
+
+The distinction matters more than it looks: this project has found both, and treating the first as the second is how architecture quietly drifts away from what is written down.
+
+### 🔴 Abort — a data-integrity failure
+
+**Stop immediately. Do not continue the checklist, and do not relaunch the application.**
+
+Step 12's condition is the clearest example: `snapshot.json` missing while `transitions.jsonl` is already empty. Any state that looks irrecoverable qualifies.
+
+**Relaunching destroys the evidence, and this is not a precaution — startup mutates state by design.** `LogWriter::open` truncates any bytes past the final record boundary, and `AppState::init` appends a `RecoverGap` transition whenever replay leaves something active. Both are correct behaviours that exist to make the app recover; both also overwrite exactly what an investigation would need to read. So, in order:
+
+1. **Do not start the app again.**
+2. Copy the whole data directory somewhere safe — `transitions.jsonl`, `snapshot.json`, and its `.tmp` sibling if present. A leftover `snapshot.json.tmp` is itself a strong signal, since a successful write renames it away.
+3. Note what the last action was before the failure, and whether the shutdown was clean.
+4. Open an issue with the copied files attached or their contents quoted.
+
+An abort is the most valuable result this checklist can produce, and the easiest to accidentally erase.
+
 ## Recording the result
 
 Add a dated line below for each full pass, including clean ones.
 
-| Date | Build | Result | Notes |
-|---|---|---|---|
-| _(not yet run)_ | | | |
-
-**If a step fails**, treat it as implementation evidence, not a UI annoyance: check whether an accepted document claims the behaviour that just failed, and if so amend the document from the evidence rather than working around it in code (`.claude/docs-standards.md`, "Treating accepted decisions during implementation").
+| Date | Commit | OS / build | Outcome | Notes |
+|---|---|---|---|---|
+| _(not yet run)_ | | | | |
