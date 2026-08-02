@@ -1,5 +1,17 @@
 # Documentation Standards
 
+## Governance model
+
+_(Summarised 2026-08-02, at the design→implementation transition. Each line is expanded in a section below; this exists so the whole model is legible without reading all of them.)_
+
+1. **Feature docs own feature behaviour. ADRs own cross-feature architectural constraints.** The test for an ADR is whether the decision constrains work *outside* the feature making it — see "When *not* to write an ADR."
+2. **Delegation is explicit when a decision belongs to another layer.** A document that declines a decision says so and names who owns it, rather than deciding it in passing. Worked example: ADR 0006 refused to decide how reconstruction payloads reference identity and delegated it to `timeline-reconstruction.md`, which decided it in its own Alternatives.
+3. **Objective implementation evidence may reopen an accepted decision. Implementation preference may not** — see "Treating accepted decisions during implementation."
+4. **Preferences are redirected, not discarded**: they go to `ideas/` and compete for a future decision.
+5. **Every implementation-dependent claim is verified before a doc reaches `accepted`** ([`principles.md`](../docs/principles.md) #8, risk **R11**). This is the one that has actually caught things — repeatedly.
+
+Rules 3 and 5 are the pair most easily read as contradicting each other. They do not: 5 is why 3's escape hatch exists, and 3 is why 5 is a gate rather than a licence to re-litigate.
+
 ## Frontmatter convention
 
 YAML frontmatter (`status`, `date`, `owner`, `related`) is used on: ADRs, Vision, Concept, feature docs, and Risks. Plain Markdown (no frontmatter) elsewhere — glossary, research, ideas.
@@ -40,6 +52,14 @@ The two phases warrant opposite default postures toward an accepted decision:
 > **Implementation evidence reopens a decision. Implementation preference does not.**
 
 Concretely, these reopen an accepted decision: the code cannot express what the doc requires; two accepted docs demand incompatible things; a claim the decision rests on turns out to be false about the code. These do not: a tidier structure suggests itself, a decision feels heavier than needed, or a constraint is inconvenient to satisfy.
+
+**A preference is not discarded — it is redirected.** The full rule has two halves, and the second is what keeps the first from reading as "good ideas are unwelcome":
+
+> **Accepted decisions are stable until contradicted by objective evidence. New preferences compete with future decisions, not accepted ones.**
+
+So a better idea that surfaces mid-implementation goes to [`ideas/`](../ideas/) — the unfiltered inbox that already exists for exactly this — where it competes on its own merits for a future feature doc or ADR. It does not get to reopen a decision the current build rests on, and it does not get lost either. Broken assumptions reopen the existing decision; better ideas queue for the next one.
+
+This matters because the two are easy to confuse in the moment: both feel like "I have found something." The question that separates them is **whether the decision is wrong or merely not what you would choose now** — and only the first is evidence.
 
 When implementation *does* produce such evidence, the response is the same as always — a new ADR superseding the old one, never an edit to an accepted decision record.
 
