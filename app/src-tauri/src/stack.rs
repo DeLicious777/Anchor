@@ -33,6 +33,7 @@ use crate::model::{
     DerivedInterruptionStatus, EndDetermination, InterruptionOutcome, StackFrame, TimeBlock, TransitionPayload,
 };
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -50,7 +51,7 @@ pub enum StackError {
     PausedBlockNotFound(Uuid),
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct InterruptionStack {
     pub active: Option<TimeBlock>,
     pub stack: Vec<StackFrame>,

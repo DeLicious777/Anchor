@@ -76,7 +76,8 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle();
             let log_path = paths::log_file_path(handle)?;
-            let (state, report) = AppState::init(&log_path)?;
+            let snapshot_path = paths::snapshot_file_path(handle)?;
+            let (state, report) = AppState::init(&log_path, &snapshot_path)?;
             // No dedicated UI surface for either signal yet — at minimum, don't
             // lose them silently.
             if report.torn_line_discarded {

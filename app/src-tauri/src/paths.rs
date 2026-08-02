@@ -22,6 +22,13 @@ pub fn templates_file_path(app: &AppHandle) -> Result<PathBuf, Box<dyn std::erro
     Ok(dir.join("templates.json"))
 }
 
+/// The compaction snapshot (#8, ADR 0004). Sits beside the log it summarises.
+pub fn snapshot_file_path(app: &AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join("snapshot.json"))
+}
+
 pub fn export_settings_file_path(app: &AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&dir)?;

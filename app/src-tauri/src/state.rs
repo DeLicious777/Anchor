@@ -3,6 +3,7 @@
 //! other, under the same lock).
 
 use crate::log::reader::replay;
+use crate::log::snapshot::Snapshot;
 use crate::log::writer::LogWriter;
 use crate::model::TransitionPayload;
 use crate::stack::InterruptionStack;
@@ -37,23 +38,46 @@ pub struct InitReport {
 }
 
 impl AppState {
-    pub fn init(path: impl AsRef<Path>) -> Result<(Self, InitReport), Box<dyn std::error::Error>> {
+    /// `snapshot_path` may not exist — a missing, corrupt or wrong-version
+    /// snapshot simply means a full replay of the log, which is always correct
+    /// (`docs/architecture/constraints.md`: the log is the source of truth and
+    /// the snapshot is only ever an optimisation of replaying it).
+    pub fn init(
+        path: impl AsRef<Path>,
+        snapshot_path: impl AsRef<Path>,
+    ) -> Result<(Self, InitReport), Box<dyn std::error::Error>> {
         let path = path.as_ref();
-        let result = replay(path, None, None)?;
+
+        let snapshot = Snapshot::load(snapshot_path);
+        let (watermark, starting_stack, snapshot_activity) = match snapshot {
+            Some(s) => (Some(s.watermark), Some(s.stack), Some(s.last_activity_at)),
+            None => (None, None, None),
+        };
+
+        let result = replay(path, watermark, starting_stack)?;
         let mut writer = LogWriter::open(path, result.next_seq)?;
         let mut stack = result.stack;
 
         let mut startup_gap_recovered = false;
-        let mut last_activity_at = result.last_timestamp.unwrap_or_else(Utc::now);
+
+        // **Assumption A15.** The last durable write is a property of the log
+        // *lines*, and compaction truncates them — so after a compaction the
+        // only remaining copy is the one the snapshot carried. Falling back to
+        // it, rather than to `Utc::now()`, is what keeps the inferred end
+        // bounded to roughly the heartbeat interval (risk R4) instead of
+        // silently billing every hour the process was not running.
+        let last_activity_on_disk = result.last_timestamp.or(snapshot_activity);
+        let mut last_activity_at = last_activity_on_disk.unwrap_or_else(Utc::now);
 
         if stack.active.is_some() {
-            // Guaranteed Some: if replay left something active, at least the
-            // line that started it was successfully parsed, so last_timestamp
-            // must be Some too. An expect() here surfaces a real bug loudly
-            // rather than silently guessing a fallback timestamp.
-            let inferred_end = result
-                .last_timestamp
-                .expect("active entry survived replay but last_timestamp is None — replay invariant violated");
+            // Guaranteed Some: an active entry reached this point either from a
+            // parsed line (which sets `last_timestamp`) or from a snapshot
+            // (which carries `last_activity_at`). An expect() here surfaces a
+            // real bug loudly rather than silently guessing a fallback — and
+            // guessing would be the dangerous option, since `Utc::now()` would
+            // infer an end covering the entire time the app was closed.
+            let inferred_end = last_activity_on_disk
+                .expect("active entry survived replay but neither the log nor the snapshot supplied a last-activity timestamp");
 
             let record = writer.append(TransitionPayload::RecoverGap { inferred_end })?;
             stack.apply(&record.payload, record.timestamp)?;
@@ -86,7 +110,146 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log::snapshot::{compact, Snapshot};
     use crate::model::EndDetermination;
+    use chrono::Duration;
+
+    /// **A15, as behaviour.** Compaction runs while a block is active, so the
+    /// snapshot holds "something is active" and the truncated log holds nothing
+    /// at all. Gap recovery must still bound the inferred end to the last
+    /// durable write — which now exists only in the snapshot.
+    ///
+    /// Without `Snapshot.last_activity_at` this test does not merely fail, it
+    /// **panics on `init`'s own expect**, because `last_timestamp` is `None`
+    /// while `stack.active` is `Some`. And the panic is the *good* outcome: the
+    /// tempting fallback, `Utc::now()`, would infer an end covering every hour
+    /// the process was not running and bill it silently — risk **R4** at
+    /// maximum severity, in the artifact that has to be trustworthy for billing.
+    #[test]
+    fn gap_recovery_after_compaction_uses_the_snapshot_timestamp_not_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+
+        let last_write = {
+            let mut writer = LogWriter::open(&path, 0).unwrap();
+            let record = writer
+                .append(TransitionPayload::Start { name: "long task".into(), project: None, client: None })
+                .unwrap();
+            record.timestamp
+        };
+
+        // Compaction, mid-session, with the block still running.
+        let replayed = replay(&path, None, None).unwrap();
+        assert!(replayed.stack.active.is_some());
+        let snapshot = Snapshot::new(replayed.next_seq - 1, replayed.stack, last_write);
+        compact(&snapshot_path, &path, &snapshot).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "the log is truncated");
+
+        // The machine is off for a long time, then the app starts again.
+        let (state, report) = AppState::init(&path, &snapshot_path).unwrap();
+        assert!(report.startup_gap_recovered);
+
+        let inner = state.inner.lock().unwrap();
+        let block = inner.stack.closed.iter().find(|b| b.name == "long task").unwrap();
+        assert_eq!(block.end_determination, Some(EndDetermination::SystemInferred));
+        assert_eq!(
+            block.end,
+            Some(last_write),
+            "the end is the last durable write carried by the snapshot, not the moment of restart"
+        );
+        assert!(
+            Utc::now() - block.end.unwrap() >= Duration::zero(),
+            "sanity: the inferred end is in the past"
+        );
+    }
+
+    /// **The durability ordering.** `compact` makes the snapshot durable before
+    /// truncating, so a crash between the two steps is survivable: the snapshot
+    /// and the still-intact log describe overlapping history, and replay folds
+    /// the post-watermark lines onto the restored projection to reach exactly
+    /// the same place.
+    ///
+    /// Compaction may duplicate work. It must never destroy recoverable history.
+    #[test]
+    fn a_crash_between_writing_the_snapshot_and_truncating_the_log_loses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+
+        let mut writer = LogWriter::open(&path, 0).unwrap();
+        writer.append(TransitionPayload::Start { name: "first".into(), project: None, client: None }).unwrap();
+        writer.append(TransitionPayload::Complete).unwrap();
+
+        // Snapshot written — and then the process dies, so the log is NOT truncated.
+        let replayed = replay(&path, None, None).unwrap();
+        let watermark = replayed.next_seq - 1;
+        Snapshot::new(watermark, replayed.stack, Utc::now()).write(&snapshot_path).unwrap();
+
+        // More work happens in a later session, above the watermark.
+        let mut writer = LogWriter::open(&path, watermark + 1).unwrap();
+        writer.append(TransitionPayload::Start { name: "second".into(), project: None, client: None }).unwrap();
+        writer.append(TransitionPayload::Complete).unwrap();
+        drop(writer);
+
+        let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+        let inner = state.inner.lock().unwrap();
+
+        let names: Vec<_> = inner.stack.closed.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, vec!["first", "second"], "both sessions survive, neither is duplicated");
+    }
+
+    /// A snapshot that cannot be trusted must not block startup: the log is the
+    /// source of truth, and the snapshot is only ever an optimisation of
+    /// replaying it (`docs/architecture/constraints.md`).
+    #[test]
+    fn a_corrupt_snapshot_falls_back_to_replaying_the_intact_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+
+        let mut writer = LogWriter::open(&path, 0).unwrap();
+        writer.append(TransitionPayload::Start { name: "work".into(), project: None, client: None }).unwrap();
+        writer.append(TransitionPayload::Complete).unwrap();
+        drop(writer);
+
+        std::fs::write(&snapshot_path, b"{\"version\": 1, \"watermark\":").unwrap();
+
+        let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+        let inner = state.inner.lock().unwrap();
+        assert_eq!(inner.stack.closed.len(), 1);
+        assert_eq!(inner.stack.closed[0].name, "work");
+    }
+
+    /// The quiet case: compaction with nothing running. No gap to recover, and
+    /// `next_seq` must still continue from the watermark rather than restarting.
+    #[test]
+    fn compaction_while_idle_recovers_no_gap_and_continues_the_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+
+        let mut writer = LogWriter::open(&path, 0).unwrap();
+        writer.append(TransitionPayload::Start { name: "done".into(), project: None, client: None }).unwrap();
+        writer.append(TransitionPayload::Complete).unwrap();
+        drop(writer);
+
+        let replayed = replay(&path, None, None).unwrap();
+        let watermark = replayed.next_seq - 1;
+        let snapshot = Snapshot::new(watermark, replayed.stack, Utc::now());
+        compact(&snapshot_path, &path, &snapshot).unwrap();
+
+        let (state, report) = AppState::init(&path, &snapshot_path).unwrap();
+        assert!(!report.startup_gap_recovered, "nothing was active, so there is no gap");
+
+        let inner = state.inner.lock().unwrap();
+        assert_eq!(inner.stack.closed.len(), 1, "history below the watermark comes from the snapshot");
+        assert_eq!(
+            inner.writer.next_seq(),
+            watermark + 1,
+            "seq continues past the watermark — a truncated log must not restart it at 0"
+        );
+    }
 
     #[test]
     fn leftover_active_entry_is_closed_as_recovered_gap_with_no_auto_resume() {
@@ -104,7 +267,7 @@ mod tests {
             // while "B" was active. "A" is still pending on the stack.
         }
 
-        let (state, report) = AppState::init(&path).unwrap();
+        let (state, report) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
         assert!(!report.torn_line_discarded);
         assert!(report.startup_gap_recovered);
 
@@ -133,7 +296,7 @@ mod tests {
             writer.append(TransitionPayload::Complete).unwrap();
         }
 
-        let (state, report) = AppState::init(&path).unwrap();
+        let (state, report) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
         assert!(!report.startup_gap_recovered);
         let inner = state.inner.lock().unwrap();
         assert!(inner.stack.active.is_none());

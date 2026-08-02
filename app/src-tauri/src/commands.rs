@@ -398,7 +398,7 @@ mod tests {
     fn switch_is_rejected_when_nothing_is_active() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
-        let (state, _) = AppState::init(&path).unwrap();
+        let (state, _) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
 
         let err = apply_transition(&state, |stack| TransitionPayload::Switch {
             name: name_or_default(String::new(), stack),
@@ -416,7 +416,7 @@ mod tests {
     fn start_is_rejected_when_something_is_already_active() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
-        let (state, _) = AppState::init(&path).unwrap();
+        let (state, _) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
 
         apply_transition(&state, |stack| TransitionPayload::Start {
             name: name_or_default(String::new(), stack),
@@ -445,7 +445,7 @@ mod tests {
     fn has_active_tracks_whether_a_task_is_being_tracked() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
-        let (state, _) = AppState::init(&path).unwrap();
+        let (state, _) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
         assert!(!state.has_active(), "nothing active on a fresh state");
 
         apply_transition(&state, |stack| TransitionPayload::Start {
@@ -464,7 +464,7 @@ mod tests {
     fn rejects_return_previous_on_empty_stack_without_writing_to_log() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
-        let (state, report) = AppState::init(&path).unwrap();
+        let (state, report) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
         assert!(!report.torn_line_discarded);
 
         apply_transition(&state, |_| TransitionPayload::Start {
@@ -493,7 +493,7 @@ mod tests {
         let path = dir.path().join("log.jsonl");
 
         let pre_drop_view = {
-            let (state, report) = AppState::init(&path).unwrap();
+            let (state, report) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
             assert!(!report.torn_line_discarded);
 
             apply_transition(&state, |_| TransitionPayload::Start {
@@ -522,7 +522,7 @@ mod tests {
             // history exactly, with no gap recovery triggered.
         };
 
-        let (restarted, report) = AppState::init(&path).unwrap();
+        let (restarted, report) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
         assert!(!report.torn_line_discarded);
         assert!(!report.startup_gap_recovered, "nothing was left active, so no gap should be detected");
         let post_restart_view = {
@@ -565,7 +565,7 @@ mod tests {
         let path = dir.path().join("log.jsonl");
 
         {
-            let (state, _report) = AppState::init(&path).unwrap();
+            let (state, _report) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
             apply_transition(&state, |_| TransitionPayload::Start {
                 name: "A".into(),
                 project: None,
@@ -575,7 +575,7 @@ mod tests {
             // Dropped here with "A" still active — no Complete/Switch/Return.
         }
 
-        let (restarted, report) = AppState::init(&path).unwrap();
+        let (restarted, report) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
         assert!(report.startup_gap_recovered);
         let inner = restarted.inner.lock().unwrap();
         assert!(inner.stack.active.is_none());
@@ -629,7 +629,7 @@ mod tests {
         let log_path = dir.path().join("log.jsonl");
         let templates_path = dir.path().join("templates.json");
 
-        let (app_state, _report) = AppState::init(&log_path).unwrap();
+        let (app_state, _report) = AppState::init(&log_path, dir.path().join("snapshot.json")).unwrap();
         let templates_state = TemplateState::init(&templates_path);
 
         let (template, _) = mutate_templates(&templates_state, |store| {
@@ -675,7 +675,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("log.jsonl");
 
-        let (app_state, _report) = AppState::init(&log_path).unwrap();
+        let (app_state, _report) = AppState::init(&log_path, dir.path().join("snapshot.json")).unwrap();
         apply_transition(&app_state, |_| TransitionPayload::Start {
             name: "A".into(),
             project: Some("Acme".into()),
@@ -751,7 +751,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("log.jsonl");
 
-        let (app_state, _report) = AppState::init(&log_path).unwrap();
+        let (app_state, _report) = AppState::init(&log_path, dir.path().join("snapshot.json")).unwrap();
         let app_state = Arc::new(app_state);
 
         // Something must be active for a heartbeat to be due at all

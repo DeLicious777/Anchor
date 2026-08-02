@@ -103,6 +103,44 @@ mod tests {
         TransitionPayload::Start { name: n.to_string(), project: None, client: None }
     }
 
+    /// **A15, at the point where the missing fact originates.**
+    ///
+    /// Compaction snapshots the projection and truncates the log. If it runs
+    /// while a block is active, the restored state says "something is active"
+    /// while the log says nothing at all — so `last_timestamp` is `None` and
+    /// `AppState::init`'s gap recovery has no bound to infer an end from. Its
+    /// stated invariant ("if replay left something active… `last_timestamp`
+    /// must be `Some`") holds only while compaction does not exist.
+    ///
+    /// This test pins the *shape* of the problem: replay alone cannot supply
+    /// the timestamp, so the snapshot must carry it. See `log::snapshot`.
+    #[test]
+    fn replay_from_a_snapshot_over_a_truncated_log_cannot_supply_a_gap_recovery_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+
+        // A session that ends with something still being tracked.
+        let mut writer = LogWriter::open(&path, 0).unwrap();
+        writer.append(payload("still-running")).unwrap();
+        let before = replay(&path, None, None).unwrap();
+        assert!(before.stack.active.is_some());
+        assert!(before.last_timestamp.is_some(), "with the log intact, replay supplies the bound");
+
+        // Compaction: snapshot the projection, truncate the log.
+        let snapshotted_stack = before.stack.clone();
+        let watermark = before.next_seq - 1;
+        fs::write(&path, b"").unwrap();
+
+        let after = replay(&path, Some(watermark), Some(snapshotted_stack)).unwrap();
+
+        assert!(after.stack.active.is_some(), "the active block survives in the snapshot");
+        assert_eq!(
+            after.last_timestamp, None,
+            "but its last-known-alive point does not — it lived in the truncated lines"
+        );
+        assert_eq!(after.next_seq, watermark + 1, "seq still continues correctly from the watermark");
+    }
+
     #[test]
     fn replay_of_missing_file_is_empty() {
         let dir = tempfile::tempdir().unwrap();
