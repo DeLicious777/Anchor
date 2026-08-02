@@ -26,6 +26,25 @@ Why this matters here specifically: an ADR set that absorbs implementation-level
 
 **A recent example of the boundary working correctly:** ADR 0006 deliberately did *not* decide whether reconstruction payloads carry the derived `Uuid` or the `seq`, and delegated it to whichever design specifies the payloads. `timeline-reconstruction.md` made the call in its own Alternatives. That is the split this section is asking for.
 
+## Treating accepted decisions during implementation
+
+_(Added 2026-08-02, author's guidance, at the design→implementation transition.)_
+
+The two phases warrant opposite default postures toward an accepted decision:
+
+- **During design**, assume new information may invalidate a previous decision. Go looking for it. This session invalidated A5 on competitive evidence, retracted a snapshot claim, and reopened ADR 0006 twice — all correct.
+- **During implementation**, assume accepted decisions are stable. Reopen one only when implementation proves it **impossible or internally inconsistent** — not because a different approach is cleaner, more idiomatic, or would have been the author's preference given the choice again.
+
+**The distinction that keeps this from misfiring here is evidence versus preference**, and it matters because this repository has a principle pulling the other way. [`principles.md`](../docs/principles.md) **#8** exists precisely because accepted docs repeatedly asserted things the code contradicted — six instances in one session, including a decision made *wrongly* because nobody checked. Nothing above weakens it. The rule is:
+
+> **Implementation evidence reopens a decision. Implementation preference does not.**
+
+Concretely, these reopen an accepted decision: the code cannot express what the doc requires; two accepted docs demand incompatible things; a claim the decision rests on turns out to be false about the code. These do not: a tidier structure suggests itself, a decision feels heavier than needed, or a constraint is inconvenient to satisfy.
+
+When implementation *does* produce such evidence, the response is the same as always — a new ADR superseding the old one, never an edit to an accepted decision record.
+
+**The failure this guards against is specific:** re-litigating settled architecture mid-build is how an implementation phase silently becomes another design phase, and the cost is paid in rework of everything built on the decision meanwhile.
+
 ## Definition of Ready
 
 Implementation may begin only when all of the following exist and have cleared the Design/Architecture workflows: Vision, Product Concept, Target Users, MVP, Core Features, Architecture, Technology Decisions, UX Flows, Roadmap, and reviewed Open Questions.
