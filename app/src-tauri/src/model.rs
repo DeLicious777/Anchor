@@ -269,6 +269,37 @@ pub enum TransitionPayload {
     /// caller (see `state::resolve_startup_gap` vs. the Slice 2 power-resume path),
     /// not baked into this transition.
     RecoverGap { inferred_end: DateTime<Utc> },
+    /// Corrects the name/project/client of a Time Block that has **already
+    /// finished** — the historical counterpart to `Rename`, and deliberately a
+    /// separate transition rather than a generalisation of it.
+    ///
+    /// The two produce identical state and are kept distinct because they answer
+    /// different questions about how that state came to be: `Rename` changes the
+    /// identity of work that is *still happening*, this corrects work that *has
+    /// happened*. Merging them would supersede a shipped, accepted transition
+    /// and `interruption-stack.md`'s "requires an active task" rule for a
+    /// modelling-tidiness gain (`timeline-reconstruction.md`, alternative D).
+    ///
+    /// `target` is the block's derived id (ADR 0006), which is why this could
+    /// not exist before that scheme was implemented — a `Uuid` regenerated per
+    /// replay cannot name a block written in an earlier session.
+    EditIdentity {
+        target: Uuid,
+        name: String,
+        project: Option<String>,
+        client: Option<String>,
+    },
+    /// Removes a Time Block from the timeline — for work that never happened,
+    /// e.g. tracking started by mistake.
+    ///
+    /// **Physical removal, not a tombstone.** Tombstoning was designed and
+    /// reviewed in full and deliberately not adopted: it buys durable,
+    /// restart-surviving undo that no accepted requirement asks for, while
+    /// creating obligations across export, Capture Rate, the snapshot payload,
+    /// the reconstruction domain and `next_default_name`. MVP has **no undo**;
+    /// Delete is confirmed instead, and a mistaken delete is recovered by
+    /// re-adding (`timeline-reconstruction.md`).
+    Delete { target: Uuid },
 }
 
 #[cfg(test)]

@@ -87,7 +87,12 @@ use std::path::{Path, PathBuf};
 /// Unlike the log's format (a stable on-disk contract per ADR 0004), the
 /// snapshot serialises *resolved* state, so it moves whenever the domain model
 /// does.
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
+// v1 → v2 (2026-08-02): `InterruptionStack` gained `issued_anchor_names` (#19).
+// Bumped rather than relying on the missing field happening to fail
+// deserialisation: "we declared this incompatible" is a stronger guarantee than
+// "serde would probably have errored", and this is the field whose absence would
+// silently allow an auto-name to be reused.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -249,7 +254,20 @@ fn counts_toward_compaction(payload: &TransitionPayload) -> bool {
         Start { .. } | Switch { .. } | Interrupt { .. } | ReturnPrevious | ReturnOriginal | Complete => true,
         // Enumerated rather than a catch-all `_ => false`, so adding a
         // transition forces a decision here instead of silently defaulting.
-        Heartbeat | Rename { .. } | RecoverGap { .. } => false,
+        // It did exactly that for the two below, which postdate ADR 0004's list.
+        //
+        // `EditIdentity` and `Delete` do **not** count, for the same reason
+        // `Rename` does not: they correct an existing record rather than opening
+        // or completing work, and reconstruction is the exception path by design
+        // (`timeline-reconstruction.md` — it "must never become the fast path").
+        // Their volume is negligible and self-limiting, so letting them advance
+        // a threshold meant to bound routine capture growth would misread what
+        // the trigger is for. A long reconstruction session is still compacted
+        // on clean shutdown, which has no threshold.
+        //
+        // Recorded as a judgment call extending ADR 0004's rule to transitions
+        // it could not have listed — not as a literal reading of that list.
+        Heartbeat | Rename { .. } | RecoverGap { .. } | EditIdentity { .. } | Delete { .. } => false,
     }
 }
 
@@ -406,7 +424,12 @@ mod tests {
         Snapshot::new(1, InterruptionStack::new(), Utc::now()).write(&path).unwrap();
 
         let raw = fs::read_to_string(&path).unwrap();
-        fs::write(&path, raw.replace("\"version\": 1", "\"version\": 999")).unwrap();
+        let current = format!("\"version\": {SNAPSHOT_VERSION}");
+        assert!(raw.contains(&current), "the written snapshot must carry the current version");
+        // Derived from the constant, not hardcoded — a hardcoded value silently
+        // stops substituting the moment the version is bumped, and the test then
+        // passes by loading a perfectly valid snapshot.
+        fs::write(&path, raw.replace(&current, "\"version\": 999")).unwrap();
 
         assert!(Snapshot::load(&path).is_none());
     }

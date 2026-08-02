@@ -217,6 +217,131 @@ mod tests {
         );
     }
 
+    /// **The reason the whole identity architecture exists, end to end.**
+    ///
+    /// Live session -> log -> restart -> replay -> `EditIdentity` naming a block
+    /// from the *previous* process -> restart again -> the reference still
+    /// points at the same block, and the edit survived.
+    ///
+    /// Every other identity test checks one link: derivation is deterministic,
+    /// or replay is stable. This one checks that a reference **persisted by one
+    /// process still resolves after later replays**, which is the actual
+    /// requirement ADR 0006 was written for. It is also the regression that
+    /// would catch an accidental return to `Uuid::new_v4()` — nothing else in
+    /// the suite fails loudly on that, because a fresh random id is internally
+    /// consistent within any single run.
+    #[test]
+    fn a_reference_written_in_one_session_still_resolves_after_later_replays() {
+        use crate::commands::{apply_transition, StackView};
+        use crate::model::CaptureOrigin;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+
+        // Session 1: do some work.
+        let target_id = {
+            let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+            apply_transition(&state, |_| TransitionPayload::Start {
+                name: "Anchor 1".into(),
+                project: None,
+                client: None,
+            })
+            .unwrap();
+            let view = apply_transition(&state, |_| TransitionPayload::Complete).unwrap();
+            view.closed[0].block.id
+        };
+
+        // Session 2: a different process replays the log and edits a block it
+        // never created, naming it by an id read from the earlier run.
+        {
+            let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+            let replayed_id = {
+                let inner = state.inner.lock().unwrap();
+                StackView::from(&inner.stack).closed[0].block.id
+            };
+            assert_eq!(replayed_id, target_id, "replay reproduced the same id");
+
+            apply_transition(&state, |_| TransitionPayload::EditIdentity {
+                target: target_id,
+                name: "quarterly report".into(),
+                project: Some("Acme".into()),
+                client: None,
+            })
+            .unwrap();
+        }
+
+        // Session 3: the durable reference is replayed from the log itself.
+        {
+            let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+            let inner = state.inner.lock().unwrap();
+            let block = &inner.stack.closed[0];
+            assert_eq!(block.id, target_id, "identity survived two further replays");
+            assert_eq!(block.name, "quarterly report", "and the edit replayed onto the right block");
+            assert_eq!(block.project.as_deref(), Some("Acme"));
+            assert_eq!(block.capture_origin, CaptureOrigin::LiveCaptureAdjusted);
+            assert_eq!(
+                inner.stack.next_default_name(block.start),
+                "Anchor 2",
+                "the renamed block's auto-name is still spent"
+            );
+        }
+    }
+
+    /// The same loop with a compaction in between, so the reference resolves
+    /// against a block that came from the **snapshot** rather than from any
+    /// surviving log line. A14 as behaviour.
+    ///
+    /// **It does not guard the derivation, and that is not an oversight.**
+    /// Verified by simulating a regression to `Uuid::new_v4()`: this test still
+    /// passes, because a snapshotted block's id is *deserialised*, never
+    /// re-derived. The derivation is guarded by
+    /// `a_reference_written_in_one_session_still_resolves_after_later_replays`
+    /// and by `log::reader`'s replay-stability test, both of which fail loudly.
+    /// Noted so nobody reads this one as covering more than it does.
+    #[test]
+    fn a_reference_still_resolves_against_a_block_restored_from_a_snapshot() {
+        use crate::commands::apply_transition;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+
+        let target_id = {
+            let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+            apply_transition(&state, |_| TransitionPayload::Start {
+                name: "old work".into(),
+                project: None,
+                client: None,
+            })
+            .unwrap();
+            let view = apply_transition(&state, |_| TransitionPayload::Complete).unwrap();
+            let id = view.closed[0].block.id;
+            compact_on_shutdown(&state);
+            id
+        };
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "only the snapshot holds that block now");
+
+        {
+            let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+            apply_transition(&state, |_| TransitionPayload::EditIdentity {
+                target: target_id,
+                name: "corrected".into(),
+                project: None,
+                client: None,
+            })
+            .unwrap();
+        }
+
+        let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+        let inner = state.inner.lock().unwrap();
+        assert_eq!(inner.stack.closed[0].id, target_id);
+        assert_eq!(
+            inner.stack.closed[0].name, "corrected",
+            "a block below the watermark is still a valid reconstruction target"
+        );
+    }
+
     /// **The durability ordering.** `compact` makes the snapshot durable before
     /// truncating, so a crash between the two steps is survivable: the snapshot
     /// and the still-intact log describe overlapping history, and replay folds

@@ -49,6 +49,15 @@ pub enum StackError {
     CannotCompleteWithOpenStack,
     #[error("internal inconsistency: paused Time Block {0} not found among closed blocks")]
     PausedBlockNotFound(Uuid),
+    #[error("no closed Time Block with id {0}")]
+    BlockNotFound(Uuid),
+    #[error("that Time Block is still running — use Rename to change an active task's identity")]
+    BlockIsActive,
+    #[error(
+        "Time Block {0} cannot be deleted while an unresolved interruption still refers to it — \
+         resume or dismiss that interruption first"
+    )]
+    BlockReferencedByOpenFrame(Uuid),
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -59,6 +68,22 @@ pub struct InterruptionStack {
     /// An `interruption_outcome` of `None` is ambiguous on its own (never
     /// interrupted vs. interrupted-and-unresolved) — use `derived_status`.
     pub closed: Vec<TimeBlock>,
+    /// Every automatic `Anchor N` name this log has ever handed out, as
+    /// `(when it was issued, N)`.
+    ///
+    /// **The invariant this exists for: deleting or renaming an automatically
+    /// named task must never let a future automatic name reuse that number on
+    /// the same day.** The allocator previously took the maximum `N` among
+    /// *surviving* blocks, so deleting today's highest-numbered one lowered the
+    /// maximum and the next unnamed task reused the name — two unrelated pieces
+    /// of work under one label on one day, which export then groups into a
+    /// single billed row (issue #19, risk **R8**).
+    ///
+    /// Tracking issuance rather than survival fixes deletion and renaming
+    /// together, because neither touches this list. Derived purely from replay,
+    /// so it needs no separate persistence and rides along in the compaction
+    /// snapshot like the rest of the projection.
+    pub issued_anchor_names: Vec<(DateTime<Utc>, u32)>,
 }
 
 impl InterruptionStack {
@@ -73,19 +98,20 @@ impl InterruptionStack {
     /// The default name assigned when a task is started without one (the
     /// Switch/Interrupt hotkeys no longer require typing a name first —
     /// see `docs/product/features/interruption-stack.md` revision). Numbered
-    /// "Anchor N", counting only Time Blocks already using this convention
-    /// that started at or after `today_start` — so the count resets every day
-    /// without a separate persisted counter, purely from the existing
-    /// timeline. `today_start` (a UTC instant marking local midnight) is
+    /// "Anchor N", counting every such name **issued** at or after
+    /// `today_start` — not every such block still surviving. The distinction is
+    /// the whole point: deleting or renaming an auto-named task must not free
+    /// its number for reuse the same day (see `issued_anchor_names`, issue #19).
+    /// The count still resets every day without a separate persisted counter,
+    /// purely from replayed state. `today_start` (a UTC instant marking local midnight) is
     /// computed by the caller, keeping this function pure and independent of
     /// the host's timezone/wall clock for testing.
     pub fn next_default_name(&self, today_start: DateTime<Utc>) -> String {
         let max_n = self
-            .closed
+            .issued_anchor_names
             .iter()
-            .chain(self.active.iter())
-            .filter(|b| b.start >= today_start)
-            .filter_map(|b| b.name.strip_prefix("Anchor ").and_then(|rest| rest.parse::<u32>().ok()))
+            .filter(|(issued_at, _)| *issued_at >= today_start)
+            .map(|(_, n)| *n)
             .max()
             .unwrap_or(0);
         format!("Anchor {}", max_n + 1)
@@ -105,6 +131,7 @@ impl InterruptionStack {
                 if self.active.is_some() {
                     return Err(StackError::AlreadyActive);
                 }
+                self.note_anchor_name(name, timestamp);
                 self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp, seq));
                 Ok(())
             }
@@ -113,6 +140,7 @@ impl InterruptionStack {
                 current.end = Some(timestamp);
                 current.end_determination = Some(EndDetermination::UserDetermined);
                 self.closed.push(current);
+                self.note_anchor_name(name, timestamp);
                 self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp, seq));
                 Ok(())
             }
@@ -137,6 +165,7 @@ impl InterruptionStack {
                 };
                 self.closed.push(current);
                 self.stack.push(frame);
+                self.note_anchor_name(name, timestamp);
                 self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp, seq));
                 Ok(())
             }
@@ -156,6 +185,7 @@ impl InterruptionStack {
                 self.close_active_if_any(timestamp);
 
                 self.resolve_paused(frame.paused_time_block_id, InterruptionOutcome::Resumed)?;
+                self.note_anchor_name(&frame.name, timestamp);
                 self.active = Some(TimeBlock::new(frame.name, frame.project, frame.client, timestamp, seq));
                 Ok(())
             }
@@ -175,6 +205,7 @@ impl InterruptionStack {
                 // Return to Previous's target.
                 let root = self.stack.pop().expect("stack was non-empty");
                 self.resolve_paused(root.paused_time_block_id, InterruptionOutcome::Resumed)?;
+                self.note_anchor_name(&root.name, timestamp);
                 self.active = Some(TimeBlock::new(root.name, root.project, root.client, timestamp, seq));
                 Ok(())
             }
@@ -204,6 +235,78 @@ impl InterruptionStack {
                 self.closed.push(current);
                 Ok(())
             }
+            TransitionPayload::EditIdentity { target, name, project, client } => {
+                self.reject_if_active(*target)?;
+                let block = self
+                    .closed
+                    .iter_mut()
+                    .find(|b| b.id == *target)
+                    .ok_or(StackError::BlockNotFound(*target))?;
+
+                block.name = name.clone();
+                block.project = project.clone();
+                block.client = client.clone();
+                // Origin is never rewritten, only marked adjusted — a manually
+                // entered block nudged once must stay distinguishable from a
+                // live capture that needed correcting.
+                block.capture_origin = block.capture_origin.adjusted();
+
+                // **Atomic with the block, not a follow-up.** A frame carries
+                // its own copy of the paused task's identity for the return
+                // path; leaving it stale would resume the task under its old
+                // name. Same `apply` call, so replay cannot interleave them.
+                for frame in self.stack.iter_mut().filter(|f| f.paused_time_block_id == *target) {
+                    frame.name = name.clone();
+                    frame.project = project.clone();
+                    frame.client = client.clone();
+                }
+                Ok(())
+            }
+            TransitionPayload::Delete { target } => {
+                self.reject_if_active(*target)?;
+                // Non-negotiable: deleting a block an unresolved frame points at
+                // would orphan `paused_time_block_id`, and the next Return would
+                // fail replay with `PausedBlockNotFound` — turning a UI action
+                // into an app that will not start.
+                if self.stack.iter().any(|f| f.paused_time_block_id == *target) {
+                    return Err(StackError::BlockReferencedByOpenFrame(*target));
+                }
+                let before = self.closed.len();
+                self.closed.retain(|b| b.id != *target);
+                if self.closed.len() == before {
+                    return Err(StackError::BlockNotFound(*target));
+                }
+                // `issued_anchor_names` is deliberately NOT touched. See its
+                // definition: a name issued today must never be reissued today,
+                // and deleting the block that carried it must not free it.
+                Ok(())
+            }
+        }
+    }
+
+    /// A block that is still running is not a reconstruction target — its span
+    /// is not yet fixed. `Rename` is the way to change an active task's
+    /// identity, and there is no way to delete one at all.
+    /// Note an automatic name has been handed out, so it can never be reissued
+    /// on the same day. Called wherever a block is created; a no-op for names
+    /// that do not follow the convention.
+    ///
+    /// Matching on the name is how the auto-name has always been recognised —
+    /// the allocator is called by the command layer and the chosen name arrives
+    /// here as an ordinary string, indistinguishable from one the user typed.
+    /// A user who manually types "Anchor 7" therefore also consumes that number,
+    /// which is the pre-existing behaviour and the safe direction: it can only
+    /// ever cause a *skip*, never a collision.
+    fn note_anchor_name(&mut self, name: &str, at: DateTime<Utc>) {
+        if let Some(n) = name.strip_prefix("Anchor ").and_then(|rest| rest.parse::<u32>().ok()) {
+            self.issued_anchor_names.push((at, n));
+        }
+    }
+
+    fn reject_if_active(&self, target: Uuid) -> Result<(), StackError> {
+        match &self.active {
+            Some(active) if active.id == target => Err(StackError::BlockIsActive),
+            _ => Ok(()),
         }
     }
 
@@ -267,6 +370,241 @@ mod tests {
 
     fn t(offset_secs: i64) -> DateTime<Utc> {
         *BASE + Duration::seconds(offset_secs)
+    }
+
+    // ---- EditIdentity ----------------------------------------------------
+
+    #[test]
+    fn edit_identity_rewrites_a_closed_block_and_marks_it_adjusted() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "wrong name", 0);
+        s.apply(&TransitionPayload::Complete, t(60), 61).unwrap();
+        let id = s.closed[0].id;
+        let (start_before, end_before) = (s.closed[0].start, s.closed[0].end);
+
+        s.apply(
+            &TransitionPayload::EditIdentity {
+                target: id,
+                name: "right name".into(),
+                project: Some("Acme".into()),
+                client: Some("Beta".into()),
+            },
+            t(999),
+            1000,
+        )
+        .unwrap();
+
+        let b = &s.closed[0];
+        assert_eq!(b.id, id, "identity is corrected, not replaced");
+        assert_eq!(b.name, "right name");
+        assert_eq!(b.project.as_deref(), Some("Acme"));
+        assert_eq!(b.client.as_deref(), Some("Beta"));
+        assert_eq!(b.capture_origin, CaptureOrigin::LiveCaptureAdjusted, "origin preserved, adjusted set");
+        assert_eq!(b.start, start_before, "timing is untouched");
+        assert_eq!(b.end, end_before);
+        assert_eq!(b.interruption_outcome, None);
+    }
+
+    /// **The atomicity rule.** A frame carries its own copy of the paused task's
+    /// identity for the return path. If an edit updated the block but not the
+    /// frame, returning to that task would resume it under the stale name — a
+    /// desync that no later transition would ever correct.
+    #[test]
+    fn edit_identity_on_an_open_frame_block_propagates_to_the_frame() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "Anchor 1", 0);
+        interrupt(&mut s, "phone call", 10);
+        let paused_id = s.stack[0].paused_time_block_id;
+
+        s.apply(
+            &TransitionPayload::EditIdentity {
+                target: paused_id,
+                name: "quarterly report".into(),
+                project: Some("Acme".into()),
+                client: None,
+            },
+            t(20),
+            21,
+        )
+        .unwrap();
+
+        assert_eq!(s.stack[0].name, "quarterly report", "the frame's copy must not go stale");
+        assert_eq!(s.stack[0].project.as_deref(), Some("Acme"));
+
+        // And the return path actually uses the corrected identity.
+        s.apply(&TransitionPayload::ReturnPrevious, t(30), 31).unwrap();
+        assert_eq!(s.active.as_ref().unwrap().name, "quarterly report");
+        assert_eq!(s.active.as_ref().unwrap().project.as_deref(), Some("Acme"));
+    }
+
+    #[test]
+    fn edit_identity_does_not_disturb_derived_interruption_status() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "root", 0);
+        interrupt(&mut s, "phone", 10);
+        let paused_id = s.stack[0].paused_time_block_id;
+        let before = s.derived_status(s.closed.iter().find(|b| b.id == paused_id).unwrap());
+        assert_eq!(before, DerivedInterruptionStatus::Pending);
+
+        s.apply(
+            &TransitionPayload::EditIdentity {
+                target: paused_id,
+                name: "renamed".into(),
+                project: None,
+                client: None,
+            },
+            t(20),
+            21,
+        )
+        .unwrap();
+
+        let after = s.derived_status(s.closed.iter().find(|b| b.id == paused_id).unwrap());
+        assert_eq!(after, DerivedInterruptionStatus::Pending, "an identity edit says nothing about interruption state");
+    }
+
+    #[test]
+    fn edit_identity_is_rejected_on_the_active_block_and_on_an_unknown_id() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "running", 0);
+        let active_id = s.active.as_ref().unwrap().id;
+
+        let edit = |target| TransitionPayload::EditIdentity {
+            target,
+            name: "x".into(),
+            project: None,
+            client: None,
+        };
+        assert_eq!(s.apply(&edit(active_id), t(10), 11), Err(StackError::BlockIsActive));
+        let unknown = Uuid::nil();
+        assert_eq!(s.apply(&edit(unknown), t(10), 11), Err(StackError::BlockNotFound(unknown)));
+    }
+
+    // ---- Delete ----------------------------------------------------------
+
+    #[test]
+    fn delete_removes_only_its_target_and_leaves_a_gap() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "A", 0);
+        s.apply(&TransitionPayload::Switch { name: "B".into(), project: None, client: None }, t(10), 11).unwrap();
+        s.apply(&TransitionPayload::Switch { name: "C".into(), project: None, client: None }, t(20), 21).unwrap();
+        let b_id = s.closed.iter().find(|b| b.name == "B").unwrap().id;
+        let (a_start, a_end) = (s.closed[0].start, s.closed[0].end);
+
+        s.apply(&TransitionPayload::Delete { target: b_id }, t(30), 31).unwrap();
+
+        assert_eq!(s.closed.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), vec!["A"]);
+        assert_eq!((s.closed[0].start, s.closed[0].end), (a_start, a_end), "neighbours are untouched");
+        assert!(s.active.is_some(), "C is still running");
+    }
+
+    /// Non-negotiable: deleting a block an unresolved frame points at would
+    /// orphan `paused_time_block_id`, and the next Return would fail replay
+    /// with `PausedBlockNotFound` — a UI action turning into an app that will
+    /// not start.
+    #[test]
+    fn delete_is_rejected_while_an_open_frame_references_the_block() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "root", 0);
+        interrupt(&mut s, "phone", 10);
+        let paused_id = s.stack[0].paused_time_block_id;
+
+        assert_eq!(
+            s.apply(&TransitionPayload::Delete { target: paused_id }, t(20), 21),
+            Err(StackError::BlockReferencedByOpenFrame(paused_id))
+        );
+        assert_eq!(s.stack.len(), 1, "the frame and its reference survive the rejection");
+        assert!(s.closed.iter().any(|b| b.id == paused_id));
+
+        // Replay still succeeds, which is the property the rejection protects.
+        s.apply(&TransitionPayload::ReturnPrevious, t(30), 31).unwrap();
+        assert_eq!(s.active.as_ref().unwrap().name, "root");
+    }
+
+    #[test]
+    fn delete_is_rejected_on_the_active_block_and_on_an_unknown_id() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "running", 0);
+        let active_id = s.active.as_ref().unwrap().id;
+
+        assert_eq!(
+            s.apply(&TransitionPayload::Delete { target: active_id }, t(10), 11),
+            Err(StackError::BlockIsActive)
+        );
+        let unknown = Uuid::nil();
+        assert_eq!(
+            s.apply(&TransitionPayload::Delete { target: unknown }, t(10), 11),
+            Err(StackError::BlockNotFound(unknown))
+        );
+    }
+
+    /// A resolved frame no longer references its block, so the block becomes
+    /// deletable — the tier rule, tested at the boundary rather than assumed.
+    #[test]
+    fn delete_is_permitted_once_the_frame_is_resolved() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "root", 0);
+        interrupt(&mut s, "phone", 10);
+        let paused_id = s.stack[0].paused_time_block_id;
+        s.apply(&TransitionPayload::ReturnPrevious, t(20), 21).unwrap();
+        assert!(s.stack.is_empty());
+
+        s.apply(&TransitionPayload::Delete { target: paused_id }, t(30), 31).unwrap();
+        assert!(!s.closed.iter().any(|b| b.id == paused_id));
+    }
+
+    // ---- #19: automatic names are never reissued -------------------------
+
+    /// **The invariant: deleting or renaming an automatically named task must
+    /// never let a future automatic name reuse that number the same day.**
+    ///
+    /// The allocator used to take the maximum among *surviving* blocks, so
+    /// deleting today's highest-numbered one lowered the maximum and the next
+    /// unnamed task reused the name — two unrelated pieces of work under one
+    /// label on one day, which export then groups into a single billed row.
+    #[test]
+    fn deleting_the_highest_auto_named_block_does_not_free_its_number() {
+        let mut s = InterruptionStack::new();
+        let today = t(0);
+        for i in 0..3 {
+            let name = s.next_default_name(today);
+            assert_eq!(name, format!("Anchor {}", i + 1));
+            s.apply(
+                &TransitionPayload::Start { name, project: None, client: None },
+                t(i * 10),
+                (i * 10) as u64 + 1,
+            )
+            .unwrap();
+            s.apply(&TransitionPayload::Complete, t(i * 10 + 5), (i * 10) as u64 + 2).unwrap();
+        }
+
+        let anchor_3 = s.closed.iter().find(|b| b.name == "Anchor 3").unwrap().id;
+        s.apply(&TransitionPayload::Delete { target: anchor_3 }, t(100), 101).unwrap();
+
+        assert_eq!(s.next_default_name(today), "Anchor 4", "the deleted number is not reissued");
+    }
+
+    #[test]
+    fn renaming_an_auto_named_block_does_not_free_its_number_either() {
+        let mut s = InterruptionStack::new();
+        let today = t(0);
+        let name = s.next_default_name(today);
+        s.apply(&TransitionPayload::Start { name, project: None, client: None }, t(0), 1).unwrap();
+        s.apply(&TransitionPayload::Complete, t(10), 11).unwrap();
+        let id = s.closed[0].id;
+
+        s.apply(
+            &TransitionPayload::EditIdentity {
+                target: id,
+                name: "a real name".into(),
+                project: None,
+                client: None,
+            },
+            t(20),
+            21,
+        )
+        .unwrap();
+
+        assert_eq!(s.next_default_name(today), "Anchor 2", "renaming does not free Anchor 1 either");
     }
 
     fn start(stack: &mut InterruptionStack, name: &str, at: i64) {
