@@ -30,7 +30,8 @@
 //!   users to create inaccurate records simply to satisfy the software").
 
 use crate::model::{
-    DerivedInterruptionStatus, EndDetermination, InterruptionOutcome, StackFrame, TimeBlock, TransitionPayload,
+    CaptureOrigin, DerivedInterruptionStatus, EndDetermination, InterruptionOutcome, StackFrame, TimeBlock,
+    TransitionPayload,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -54,10 +55,16 @@ pub enum StackError {
     #[error("that Time Block is still running — use Rename to change an active task's identity")]
     BlockIsActive,
     #[error(
-        "Time Block {0} cannot be deleted while an unresolved interruption still refers to it — \
-         resume or dismiss that interruption first"
+        "Time Block {0} cannot be reshaped or deleted while an unresolved interruption still \
+         refers to it — resume or dismiss that interruption first. Its identity can still be corrected."
     )]
     BlockReferencedByOpenFrame(Uuid),
+    #[error("that span overlaps work already on the timeline")]
+    OverlapsExistingBlock,
+    #[error("a Time Block cannot end in the future — every block represents work that actually happened")]
+    EndsInTheFuture,
+    #[error("a Time Block must end after it starts")]
+    EndNotAfterStart,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -235,6 +242,62 @@ impl InterruptionStack {
                 self.closed.push(current);
                 Ok(())
             }
+            TransitionPayload::Add { name, project, client, start, end } => {
+                self.validate_span(*start, *end, None, timestamp)?;
+                self.note_anchor_name(name, *start);
+                let mut block = TimeBlock::new(name.clone(), project.clone(), client.clone(), *start, seq);
+                block.end = Some(*end);
+                // Reconstructed, and permanently marked as such — this is what
+                // keeps Capture Rate honest about how much of a day was
+                // captured versus reconstructed (risk R10's falsifiability).
+                block.capture_origin = CaptureOrigin::ManualEntry;
+                // The user chose this end. Nothing was inferred.
+                block.end_determination = Some(EndDetermination::UserDetermined);
+                self.closed.push(block);
+                Ok(())
+            }
+            TransitionPayload::Move { target, start } => {
+                self.reject_if_active(*target)?;
+                self.reject_if_frame_referenced(*target)?;
+                let index = self.closed_index(*target)?;
+
+                // Duration comes from the block's own span, so it is preserved
+                // by construction rather than by a check — the payload cannot
+                // express a duration change at all.
+                let block = &self.closed[index];
+                let duration = block.end.ok_or(StackError::EndNotAfterStart)? - block.start;
+                let end = *start + duration;
+
+                self.validate_span(*start, end, Some(*target), timestamp)?;
+
+                let block = &mut self.closed[index];
+                block.start = *start;
+                block.end = Some(end);
+                // Move sets both boundaries, so the end is now user-determined.
+                block.end_determination = Some(EndDetermination::UserDetermined);
+                block.capture_origin = block.capture_origin.adjusted();
+                Ok(())
+            }
+            TransitionPayload::Resize { target, start, end } => {
+                self.reject_if_active(*target)?;
+                self.reject_if_frame_referenced(*target)?;
+                let index = self.closed_index(*target)?;
+                self.validate_span(*start, *end, Some(*target), timestamp)?;
+
+                let block = &mut self.closed[index];
+                let end_changed = block.end != Some(*end);
+                block.start = *start;
+                block.end = Some(*end);
+                // Only an operation that actually sets the *end* says anything
+                // about how the end was established. Moving the start alone
+                // leaves the determination untouched — a start-only correction
+                // must not silently claim the user fixed an inferred end.
+                if end_changed {
+                    block.end_determination = Some(EndDetermination::UserDetermined);
+                }
+                block.capture_origin = block.capture_origin.adjusted();
+                Ok(())
+            }
             TransitionPayload::EditIdentity { target, name, project, client } => {
                 self.reject_if_active(*target)?;
                 let block = self
@@ -268,9 +331,7 @@ impl InterruptionStack {
                 // would orphan `paused_time_block_id`, and the next Return would
                 // fail replay with `PausedBlockNotFound` — turning a UI action
                 // into an app that will not start.
-                if self.stack.iter().any(|f| f.paused_time_block_id == *target) {
-                    return Err(StackError::BlockReferencedByOpenFrame(*target));
-                }
+                self.reject_if_frame_referenced(*target)?;
                 let before = self.closed.len();
                 self.closed.retain(|b| b.id != *target);
                 if self.closed.len() == before {
@@ -301,6 +362,78 @@ impl InterruptionStack {
         if let Some(n) = name.strip_prefix("Anchor ").and_then(|rest| rest.parse::<u32>().ok()) {
             self.issued_anchor_names.push((at, n));
         }
+    }
+
+    /// The one place a reconstructed span is validated, and the reason
+    /// `timeline-reconstruction.md` insists the domain rejects rather than
+    /// relying on the editor to clamp: a UI-only invariant is one bug — or one
+    /// non-editor caller — away from an overlapping billing record. Replay is
+    /// already such a caller, and import will be another.
+    ///
+    /// `now` is **the transition's own timestamp, never a wall-clock read**.
+    /// The state machine is the single place live commands and replay share, so
+    /// a `Utc::now()` in here would make replay depend on when it runs and break
+    /// the reproducibility everything else rests on. The live path supplies the
+    /// record's timestamp; replay supplies the recorded one; this code cannot
+    /// tell them apart and must not try.
+    fn validate_span(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        exclude: Option<Uuid>,
+        now: DateTime<Utc>,
+    ) -> Result<(), StackError> {
+        if end <= start {
+            return Err(StackError::EndNotAfterStart);
+        }
+        if end > now {
+            return Err(StackError::EndsInTheFuture);
+        }
+
+        // Half-open intervals: [a, b) and [c, d) overlap iff a < d && c < b. So
+        // abutting spans — one ending exactly where the next begins — do not
+        // collide, which is what makes the editor's "clamp at the neighbouring
+        // boundary" land on a legal result rather than one off by an instant.
+        let overlaps = |other_start: DateTime<Utc>, other_end: DateTime<Utc>| start < other_end && other_start < end;
+
+        let hits_closed = self
+            .closed
+            .iter()
+            .filter(|b| Some(b.id) != exclude)
+            .any(|b| overlaps(b.start, b.end.unwrap_or(now)));
+
+        // The active block is a collision boundary whose end is `now` — it has
+        // no fixed end, so its occupied span grows as time passes. Reconstruction
+        // can never place work inside the span Anchor believes is currently being
+        // tracked, which is correct: per the record, the user was doing that.
+        let hits_active = self
+            .active
+            .as_ref()
+            .filter(|b| Some(b.id) != exclude)
+            .is_some_and(|b| overlaps(b.start, now.max(b.start)));
+
+        if hits_closed || hits_active {
+            return Err(StackError::OverlapsExistingBlock);
+        }
+        Ok(())
+    }
+
+    /// A block whose interruption is still unresolved may have its identity
+    /// corrected but not its span reshaped — the "identity only" tier. You
+    /// cannot reshape work whose outcome you still owe.
+    fn reject_if_frame_referenced(&self, target: Uuid) -> Result<(), StackError> {
+        if self.stack.iter().any(|f| f.paused_time_block_id == target) {
+            return Err(StackError::BlockReferencedByOpenFrame(target));
+        }
+        Ok(())
+    }
+
+    /// Find a closed block, or say which id failed to resolve.
+    fn closed_index(&self, target: Uuid) -> Result<usize, StackError> {
+        self.closed
+            .iter()
+            .position(|b| b.id == target)
+            .ok_or(StackError::BlockNotFound(target))
     }
 
     fn reject_if_active(&self, target: Uuid) -> Result<(), StackError> {
@@ -370,6 +503,247 @@ mod tests {
 
     fn t(offset_secs: i64) -> DateTime<Utc> {
         *BASE + Duration::seconds(offset_secs)
+    }
+
+    // ---- Add / Move / Resize, and the collision rules --------------------
+
+    /// A timeline with two finished blocks and nothing running: 09:00–10:00 and
+    /// 11:00–12:00, leaving a free hour between them. `now` is 13:00.
+    fn two_blocks_with_a_gap() -> InterruptionStack {
+        let mut s = InterruptionStack::new();
+        s.apply(&add("morning", 0, 3600), t(46800), 1).unwrap();
+        s.apply(&add("late morning", 7200, 10800), t(46800), 2).unwrap();
+        s
+    }
+
+    fn add(name: &str, start: i64, end: i64) -> TransitionPayload {
+        TransitionPayload::Add {
+            name: name.into(),
+            project: None,
+            client: None,
+            start: t(start),
+            end: t(end),
+        }
+    }
+
+    #[test]
+    fn add_creates_an_independent_manual_entry_block() {
+        let mut s = InterruptionStack::new();
+        s.apply(&add("forgotten meeting", 0, 3600), t(46800), 7).unwrap();
+
+        let b = &s.closed[0];
+        assert_eq!(b.name, "forgotten meeting");
+        assert_eq!(b.start, t(0));
+        assert_eq!(b.end, Some(t(3600)));
+        assert_eq!(b.capture_origin, CaptureOrigin::ManualEntry, "reconstructed work is permanently marked");
+        assert_eq!(b.end_determination, Some(EndDetermination::UserDetermined), "the user chose this end");
+        assert_eq!(b.interruption_outcome, None);
+        assert!(s.stack.is_empty(), "Add never touches the interruption stack");
+        assert!(s.active.is_none(), "and never starts anything");
+        assert_eq!(s.derived_status(b), DerivedInterruptionStatus::NeverInterrupted);
+    }
+
+    /// The domain rejects overlaps regardless of caller. The editor's clamping
+    /// is a usability device; this is the guarantee, and it is what stops a
+    /// non-editor caller — replay, a test, a future import — from persisting an
+    /// overlapping billing record.
+    #[test]
+    fn the_domain_rejects_every_overlapping_span_not_just_the_editor() {
+        let mut s = two_blocks_with_a_gap();
+
+        // Straddling an existing block, contained within one, and exactly
+        // covering one all fail the same way.
+        // The last case spans both blocks and the gap; it ends before `now`
+        // so it fails on overlap rather than on the future check.
+        for (start, end) in [(1800, 5400), (600, 1200), (0, 3600), (-600, 20000)] {
+            assert_eq!(
+                s.apply(&add("clash", start, end), t(46800), 9),
+                Err(StackError::OverlapsExistingBlock),
+                "span {start}..{end} must be rejected"
+            );
+        }
+        assert_eq!(s.closed.len(), 2, "no rejected span was persisted");
+    }
+
+    /// Half-open intervals, so a span ending exactly where the next begins is
+    /// legal. This is what makes the editor's "clamp at the neighbouring
+    /// boundary" land on a result the domain accepts, rather than one rejected
+    /// by an instant.
+    #[test]
+    fn spans_that_exactly_abut_a_neighbour_are_accepted() {
+        let mut s = two_blocks_with_a_gap();
+        s.apply(&add("fills the gap", 3600, 7200), t(46800), 9).unwrap();
+        assert_eq!(s.closed.len(), 3);
+    }
+
+    #[test]
+    fn a_block_may_not_end_in_the_future_or_end_before_it_starts() {
+        let mut s = InterruptionStack::new();
+        assert_eq!(
+            s.apply(&add("tomorrow", 0, 3600), t(1800), 1),
+            Err(StackError::EndsInTheFuture),
+            "the transition's own timestamp is the present moment"
+        );
+        assert_eq!(s.apply(&add("backwards", 3600, 3600), t(46800), 1), Err(StackError::EndNotAfterStart));
+        assert_eq!(s.apply(&add("inverted", 3600, 0), t(46800), 1), Err(StackError::EndNotAfterStart));
+    }
+
+    /// The active block is a collision boundary with no fixed end, so its
+    /// occupied span runs to the transition's timestamp. Reconstruction can
+    /// never place work inside the span Anchor believes is being tracked.
+    #[test]
+    fn the_active_blocks_live_span_blocks_reconstruction_up_to_the_present() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "running", 3600); // active from 01:00, still going
+
+        assert_eq!(
+            s.apply(&add("inside the live span", 5400, 7200), t(10800), 9),
+            Err(StackError::OverlapsExistingBlock)
+        );
+        // Entirely before the active block is fine.
+        s.apply(&add("earlier", 0, 3600), t(10800), 10).unwrap();
+        assert_eq!(s.closed.len(), 1);
+    }
+
+    /// Validation reads the transition's timestamp, never a wall clock — so
+    /// replaying a historical line yields the same verdict it did live. This is
+    /// asserted rather than argued: `reader.rs` calls `apply` on every line, and
+    /// a `Utc::now()` in the domain would make replay depend on when it runs.
+    #[test]
+    fn span_validation_uses_the_transitions_timestamp_not_the_wall_clock() {
+        let mut s = InterruptionStack::new();
+        // A span far in the real-world past, applied with a timestamp that
+        // makes it "the future" — must be rejected on the record's terms.
+        assert_eq!(s.apply(&add("x", 3600, 7200), t(5400), 1), Err(StackError::EndsInTheFuture));
+        // Same span, later timestamp: accepted. Nothing about the host clock
+        // changed between these two lines.
+        s.apply(&add("x", 3600, 7200), t(46800), 2).unwrap();
+        assert_eq!(s.closed.len(), 1);
+    }
+
+    #[test]
+    fn move_preserves_duration_exactly_and_marks_the_end_user_determined() {
+        let mut s = two_blocks_with_a_gap();
+        let id = s.closed[0].id;
+        let duration = s.closed[0].end.unwrap() - s.closed[0].start;
+
+        s.apply(&TransitionPayload::Move { target: id, start: t(3600) }, t(46800), 9).unwrap();
+
+        let b = s.closed.iter().find(|b| b.id == id).unwrap();
+        assert_eq!(b.start, t(3600));
+        assert_eq!(b.end.unwrap() - b.start, duration, "duration is preserved by construction");
+        assert_eq!(b.end_determination, Some(EndDetermination::UserDetermined));
+        assert_eq!(b.capture_origin, CaptureOrigin::ManualEntryAdjusted, "origin kept, adjusted set");
+    }
+
+    #[test]
+    fn move_is_rejected_when_the_translated_span_would_collide() {
+        let mut s = two_blocks_with_a_gap();
+        let id = s.closed[0].id;
+        // Moving the 09:00–10:00 block to 10:30 would run into the 11:00 block.
+        assert_eq!(
+            s.apply(&TransitionPayload::Move { target: id, start: t(5400) }, t(46800), 9),
+            Err(StackError::OverlapsExistingBlock)
+        );
+        assert_eq!(s.closed[0].start, t(0), "the rejected move left the block untouched");
+    }
+
+    /// A block never collides with itself — otherwise every Resize that kept
+    /// any overlap with its own previous span would be rejected.
+    #[test]
+    fn resize_changes_duration_and_does_not_collide_with_its_own_previous_span() {
+        let mut s = two_blocks_with_a_gap();
+        let id = s.closed[0].id;
+
+        s.apply(&TransitionPayload::Resize { target: id, start: t(0), end: t(5400) }, t(46800), 9).unwrap();
+
+        let b = s.closed.iter().find(|b| b.id == id).unwrap();
+        assert_eq!(b.end, Some(t(5400)));
+        assert_eq!(b.end_determination, Some(EndDetermination::UserDetermined));
+    }
+
+    /// The R9 path: correcting a wrongly inferred end must stop the block
+    /// claiming Anchor inferred it.
+    #[test]
+    fn resizing_the_end_of_an_inferred_block_makes_it_user_determined() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "crashed", 0);
+        s.apply(&TransitionPayload::RecoverGap { inferred_end: t(1800) }, t(3600), 5).unwrap();
+        let id = s.closed[0].id;
+        assert_eq!(s.closed[0].end_determination, Some(EndDetermination::SystemInferred));
+
+        s.apply(&TransitionPayload::Resize { target: id, start: t(0), end: t(3000) }, t(46800), 9).unwrap();
+        assert_eq!(s.closed[0].end_determination, Some(EndDetermination::UserDetermined));
+    }
+
+    /// Editing only the *start* says nothing about how the end was established,
+    /// so it must not silently claim the user fixed an inferred end.
+    #[test]
+    fn resizing_only_the_start_leaves_end_determination_untouched() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "crashed", 0);
+        s.apply(&TransitionPayload::RecoverGap { inferred_end: t(1800) }, t(3600), 5).unwrap();
+        let id = s.closed[0].id;
+
+        s.apply(&TransitionPayload::Resize { target: id, start: t(600), end: t(1800) }, t(46800), 9).unwrap();
+
+        assert_eq!(s.closed[0].start, t(600));
+        assert_eq!(
+            s.closed[0].end_determination,
+            Some(EndDetermination::SystemInferred),
+            "the end is unchanged, so its determination is too"
+        );
+    }
+
+    /// The "identity only" tier, on the two operations that reshape rather than
+    /// relabel. You cannot reshape work whose outcome you still owe.
+    #[test]
+    fn move_and_resize_are_rejected_on_an_open_frame_block_while_edit_identity_is_not() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "root", 0);
+        interrupt(&mut s, "phone", 3600);
+        let paused = s.stack[0].paused_time_block_id;
+
+        assert_eq!(
+            s.apply(&TransitionPayload::Move { target: paused, start: t(7200) }, t(46800), 9),
+            Err(StackError::BlockReferencedByOpenFrame(paused))
+        );
+        assert_eq!(
+            s.apply(&TransitionPayload::Resize { target: paused, start: t(0), end: t(1800) }, t(46800), 9),
+            Err(StackError::BlockReferencedByOpenFrame(paused))
+        );
+        s.apply(
+            &TransitionPayload::EditIdentity { target: paused, name: "ok".into(), project: None, client: None },
+            t(46800),
+            9,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn move_and_resize_are_rejected_on_the_active_block() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "running", 0);
+        let id = s.active.as_ref().unwrap().id;
+
+        assert_eq!(
+            s.apply(&TransitionPayload::Move { target: id, start: t(3600) }, t(46800), 9),
+            Err(StackError::BlockIsActive)
+        );
+        assert_eq!(
+            s.apply(&TransitionPayload::Resize { target: id, start: t(0), end: t(1800) }, t(46800), 9),
+            Err(StackError::BlockIsActive)
+        );
+    }
+
+    /// An added block consumes its auto-name like any other, so reconstruction
+    /// cannot hand out a number the same day's live capture already used.
+    #[test]
+    fn an_added_block_consumes_its_auto_name() {
+        let mut s = InterruptionStack::new();
+        let today = t(0);
+        s.apply(&add("Anchor 1", 0, 3600), t(46800), 1).unwrap();
+        assert_eq!(s.next_default_name(today), "Anchor 2");
     }
 
     // ---- EditIdentity ----------------------------------------------------

@@ -265,9 +265,20 @@ fn counts_toward_compaction(payload: &TransitionPayload) -> bool {
         // the trigger is for. A long reconstruction session is still compacted
         // on clean shutdown, which has no threshold.
         //
+        // The same applies to `Add`, `Move` and `Resize`: `Add` does create a
+        // Time Block, but for work that already happened rather than work now
+        // starting, and all three are reconstruction — the exception path.
+        //
         // Recorded as a judgment call extending ADR 0004's rule to transitions
         // it could not have listed — not as a literal reading of that list.
-        Heartbeat | Rename { .. } | RecoverGap { .. } | EditIdentity { .. } | Delete { .. } => false,
+        Heartbeat
+        | Rename { .. }
+        | RecoverGap { .. }
+        | EditIdentity { .. }
+        | Delete { .. }
+        | Add { .. }
+        | Move { .. }
+        | Resize { .. } => false,
     }
 }
 

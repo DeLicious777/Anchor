@@ -289,6 +289,44 @@ pub enum TransitionPayload {
         project: Option<String>,
         client: Option<String>,
     },
+    /// Creates a Time Block for work that happened but was never captured
+    /// (risk **R3**) — the first transition to carry author-chosen boundaries
+    /// rather than deriving them from when it was logged.
+    ///
+    /// Always an independent block: it never touches the interruption stack,
+    /// carries no `InterruptionOutcome`, and pushes no frame. There is
+    /// deliberately no way to reconstruct an interruption *relationship* after
+    /// the fact — the stack records what the user actually did in the moment,
+    /// and inventing one retroactively would fabricate provenance.
+    Add {
+        name: String,
+        project: Option<String>,
+        client: Option<String>,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    },
+    /// Translates a block to a new start, **preserving its duration exactly**.
+    ///
+    /// Carries only the new `start` on purpose: duration preservation is Move's
+    /// entire problem statement ("a 60-minute meeting recorded 30 minutes early
+    /// has the right duration in the wrong place"), so the payload is shaped so
+    /// it *cannot* express a duration change. The end is derived from the
+    /// block's own span at replay time, which is deterministic because that span
+    /// is itself a product of earlier transitions.
+    Move { target: Uuid, start: DateTime<Utc> },
+    /// Reshapes a block's span — the mechanism risks **R9** and **R4** have been
+    /// promised since 2026-07-23 and never had.
+    ///
+    /// Distinct from `Move` even though both can produce the same state, for the
+    /// same reason `EditIdentity` is distinct from `Rename`: they answer
+    /// different questions about how that state came to be. Resize says *the
+    /// timing was wrong*; Move says *the duration was right and the position was
+    /// wrong*.
+    Resize {
+        target: Uuid,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    },
     /// Removes a Time Block from the timeline — for work that never happened,
     /// e.g. tracking started by mistake.
     ///
