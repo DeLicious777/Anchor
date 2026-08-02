@@ -635,6 +635,7 @@
     {#if closedMostRecentFirst.length === 0}
       <p>None yet.</p>
     {:else}
+      <div class="table-scroll">
       <table>
         <thead>
           <!-- "End" is the time; "End source" is how that time was established.
@@ -663,18 +664,25 @@
                    directly: absent is ambiguous, and no view may reinterpret it. -->
               <td>{block.derived_interruption_status}</td>
               <td class="actions">
-                {#if pendingDeleteId === block.id}
-                  <!-- Delete destroys a billing record and there is no undo, so
-                       it is confirmed. Cancelling performs no transition at all. -->
-                  <span class="confirm">Delete this block?</span>
-                  <button type="button" class="danger" onclick={confirmDelete}>Delete</button>
-                  <button type="button" onclick={() => (pendingDeleteId = null)}>Cancel</button>
-                {:else}
-                  <button type="button" onclick={() => beginEdit(block)}>Edit</button>
-                  <button type="button" onclick={() => (pendingDeleteId = block.id)}>Delete</button>
-                {/if}
+                <button type="button" onclick={() => beginEdit(block)}>Edit</button>
+                <button type="button" onclick={() => (pendingDeleteId = block.id)}>Delete</button>
               </td>
             </tr>
+            {#if pendingDeleteId === block.id}
+              <!-- Its own full-width row, not inline in the actions cell: inline
+                   it more than doubled that column's width and could be pushed
+                   off-screen at the dashboard's default 800x600, so the user
+                   could click Delete without ever reading the question. -->
+              <tr class="confirm-row">
+                <td colspan="10">
+                  <strong>Delete “{block.name}” permanently?</strong>
+                  This removes it from the timeline and from every future export.
+                  <em>There is no undo</em> — recovering it means adding it again by hand.
+                  <button type="button" class="danger" onclick={confirmDelete}>Delete permanently</button>
+                  <button type="button" onclick={() => (pendingDeleteId = null)}>Cancel</button>
+                </td>
+              </tr>
+            {/if}
             {#if editingId === block.id}
               <tr class="edit-row">
                 <td colspan="10">
@@ -693,6 +701,7 @@
           {/each}
         </tbody>
       </table>
+      </div>
     {/if}
   </section>
 
@@ -798,9 +807,15 @@
   td.actions {
     white-space: nowrap;
   }
-  td.actions .confirm {
-    margin-right: 0.5rem;
-    font-weight: 600;
+  .table-scroll {
+    overflow-x: auto;
+  }
+  tr.confirm-row td {
+    background: #fff6f6;
+    padding: 0.6rem 0.5rem;
+  }
+  tr.confirm-row button {
+    margin-left: 0.5rem;
   }
   button.danger {
     color: #b00020;
