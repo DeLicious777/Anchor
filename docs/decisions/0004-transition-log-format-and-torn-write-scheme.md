@@ -18,7 +18,7 @@ related: [docs/product/features/interruption-stack.md, docs/decisions/0002-deskt
 >
 >   **One such path is closed** (2026-07-29, [`78096a8`](https://github.com/DeLicious777/Anchor/commit/78096a8), issue #18): a discarded torn tail was never truncated, so the next append was concatenated onto it. That turned out to be worse than `seq` reuse — it permanently destroyed everything written after a torn write, falsifying this ADR's "a torn write can only affect the last record". `LogWriter::open` now truncates to the final record boundary. See `docs/risks.md` R5.
 >
->   **One path remains open**, tracked as `docs/risks.md` **R14**: a `seq` can still be consumed by an append that did not fully and durably complete — a failed or partial `write_all`, or a failed `sync_all` — because `next_seq` is only incremented after both succeed, while bytes may already have reached disk. Closing it is a prerequisite of ADR 0006.
+>   **The second path is also closed** (2026-08-02, `docs/risks.md` **R14**): a `seq` could be consumed by an append that did not fully and durably complete — a failed or partial `write_all`, or a failed `sync_all` — because `next_seq` advanced only after both succeeded, while bytes may already have reached disk. `append` now records the file length beforehand and restores it on any failure, so an append is all-or-nothing. Both consumers of `seq` uniqueness — this ADR's watermark filter and ADR 0006's identity derivation — now rest on an invariant the writer actually enforces.
 > - **The snapshot must persist each Time Block's `id`.** Blocks below the watermark are never replayed, so their identity can come only from the snapshot. This is the same payload-vs-mechanism gap ADR 0005 closed as assumption A10, in the same document.
 
 ## Context

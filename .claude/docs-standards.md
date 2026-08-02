@@ -10,6 +10,22 @@ YAML frontmatter (`status`, `date`, `owner`, `related`) is used on: ADRs, Vision
 
 Sequential, starting at `0001` (`0000` is reserved for the template). Never renumber or reuse a number — a reversed decision gets a new ADR that marks the old one `superseded`, not a deletion.
 
+## When *not* to write an ADR
+
+_(Added 2026-08-02, author's guidance, at the point where the foundations are in place.)_
+
+ADRs 0004, 0005 and 0006 established the architectural foundations — event sourcing, reconstruction semantics, persistent identity. **From here, new ADRs should become markedly rarer.** The remaining work (Timeline Editor, redesign implementation, reconstruction implementation) is mostly *implementing* existing decisions, not making new ones.
+
+So before starting an ADR, ask:
+
+> **Is this actually a new architectural decision, or is it an implementation detail that belongs in the feature design?**
+
+The test is not "is this important" or "is this hard to reverse in code" — plenty of implementation choices are both. It is whether the decision **constrains work outside the feature that makes it**: a durable on-disk contract, a rule other features must obey, or a change to what an accepted ADR already decided. If the answer is "only this feature depends on it," it belongs in the feature doc's Technical Constraints, where it stays next to the design it serves.
+
+Why this matters here specifically: an ADR set that absorbs implementation-level decisions stops being a map of the architecture and becomes a second, competing home for design detail — and the two drift. The existing set earns its place because each entry is referenced by documents that did not write it. Keep that property.
+
+**A recent example of the boundary working correctly:** ADR 0006 deliberately did *not* decide whether reconstruction payloads carry the derived `Uuid` or the `seq`, and delegated it to whichever design specifies the payloads. `timeline-reconstruction.md` made the call in its own Alternatives. That is the split this section is asking for.
+
 ## Definition of Ready
 
 Implementation may begin only when all of the following exist and have cleared the Design/Architecture workflows: Vision, Product Concept, Target Users, MVP, Core Features, Architecture, Technology Decisions, UX Flows, Roadmap, and reviewed Open Questions.

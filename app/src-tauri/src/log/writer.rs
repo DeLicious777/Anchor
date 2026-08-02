@@ -74,10 +74,26 @@ fn truncate_incomplete_tail(path: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Restore the file to exactly `len` bytes and make that durable.
+///
+/// The rollback half of `append`'s all-or-nothing guarantee. `truncate_incomplete_tail`
+/// handles the *startup* case by cutting back to the last newline; this handles the
+/// *in-session* case, where cutting to the last newline would be wrong — a failed
+/// `sync_all` can leave a line that is complete and newline-terminated, yet was never
+/// acknowledged to its caller. Only the caller's recorded pre-append length identifies
+/// what to remove.
+fn rollback_to(file: &mut File, len: u64) -> std::io::Result<()> {
+    file.set_len(len)?;
+    file.sync_all()
+}
+
 pub struct LogWriter {
     path: PathBuf,
     file: File,
     next_seq: u64,
+    /// Set when a rollback itself failed, leaving the file at an unknown length.
+    /// Further appends are refused rather than written onto an unknown tail.
+    poisoned: bool,
 }
 
 impl LogWriter {
@@ -92,7 +108,7 @@ impl LogWriter {
         // an unfinished one. See `truncate_incomplete_tail`.
         truncate_incomplete_tail(&path)?;
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
-        Ok(Self { path, file, next_seq })
+        Ok(Self { path, file, next_seq, poisoned: false })
     }
 
     pub fn path(&self) -> &Path {
@@ -105,7 +121,36 @@ impl LogWriter {
 
     /// Append one transition. Returns the fully-assigned record on success —
     /// the caller applies it to the in-memory stack only after this returns Ok.
+    ///
+    /// **All-or-nothing: a failed append consumes no sequence number and leaves no
+    /// bytes behind.** Previously it could do both. `next_seq` advanced only after
+    /// `write_all` *and* `sync_all` succeeded, while bytes could already have reached
+    /// disk either way — so a failure left the file dirty and the number reusable, in
+    /// two distinct ways (`docs/risks.md` **R14**):
+    ///
+    /// - a failed `sync_all` could leave a complete, checksum-valid line for that
+    ///   `seq` on disk, and the next append would reuse the number — two readable
+    ///   lines with the same `seq`, which makes ADR 0004's watermark filter undefined
+    ///   and, under [ADR 0006], gives two Time Blocks the same identity;
+    /// - a failed or partial `write_all` could leave an unterminated fragment.
+    ///   `truncate_incomplete_tail` only runs at `open`, so nothing repaired it before
+    ///   the next append concatenated onto it — reproducing the permanent data loss of
+    ///   the torn-tail bug *within a single session* rather than across a restart.
+    ///
+    /// Both close the same way: record the length before writing, and on any failure
+    /// restore it. The caller was never told the append succeeded, so removing it is
+    /// exactly "not durably committed" — the same reasoning `truncate_incomplete_tail`
+    /// documents, applied to the case where the tail is still newline-terminated and
+    /// therefore invisible to it.
     pub fn append(&mut self, payload: TransitionPayload) -> std::io::Result<TransitionRecord> {
+        if self.poisoned {
+            return Err(std::io::Error::other(
+                "log writer is poisoned: a previous append failed and could not be \
+                 rolled back, so the file's length is unknown. Restart to recover — \
+                 `open` repairs the tail.",
+            ));
+        }
+
         let record = TransitionRecord {
             seq: self.next_seq,
             timestamp: Utc::now(),
@@ -113,8 +158,26 @@ impl LogWriter {
         };
         let line = encode_line(&record)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        self.file.write_all(line.as_bytes())?;
-        self.file.sync_all()?;
+
+        // Captured before the write so a rollback restores the exact prior state.
+        // Cutting to the last newline instead would be wrong here: a failed
+        // `sync_all` leaves a line that *is* newline-terminated.
+        let len_before = self.file.metadata()?.len();
+
+        if let Err(e) = self
+            .file
+            .write_all(line.as_bytes())
+            .and_then(|()| self.file.sync_all())
+        {
+            // Rollback failure is unrecoverable in-session: the length is now unknown,
+            // and appending onto an unknown tail is precisely the bug above. Refuse
+            // instead, and surface the original cause rather than the rollback's.
+            if rollback_to(&mut self.file, len_before).is_err() {
+                self.poisoned = true;
+            }
+            return Err(e);
+        }
+
         self.next_seq += 1;
         Ok(record)
     }
@@ -128,6 +191,70 @@ mod tests {
 
     fn sample_payload(n: &str) -> TransitionPayload {
         TransitionPayload::Start { name: n.to_string(), project: None, client: None }
+    }
+
+    /// The rollback mechanism behind `append`'s all-or-nothing guarantee, on the
+    /// case `truncate_incomplete_tail` cannot handle: the bytes to remove form a
+    /// **complete, newline-terminated line**, which is what a failed `sync_all`
+    /// leaves behind. Cutting to the last newline would keep it; only the recorded
+    /// pre-append length identifies it.
+    #[test]
+    fn rollback_removes_a_complete_line_that_truncating_to_a_newline_would_keep() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let mut writer = LogWriter::open(&path, 0).unwrap();
+        writer.append(sample_payload("committed")).unwrap();
+
+        let len_before = std::fs::metadata(&path).unwrap().len();
+        // A second complete record, exactly as a successful `write_all` leaves it.
+        writer.append(sample_payload("never-acknowledged")).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > len_before);
+
+        // `truncate_incomplete_tail` is a no-op here — the file ends in a newline,
+        // so it cannot see that the last line was never acknowledged.
+        assert!(!truncate_incomplete_tail(&path).unwrap());
+
+        let mut file = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        rollback_to(&mut file, len_before).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+        assert!(contents.contains("committed"));
+        assert!(!contents.contains("never-acknowledged"));
+        assert!(contents.ends_with('\n'), "must still end at a record boundary");
+        let record = decode_line(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(record.seq, 0, "committed history is untouched");
+    }
+
+    /// A rollback that itself fails leaves the file at an unknown length. Appending
+    /// onto an unknown tail is exactly the torn-tail data-loss bug, so the writer
+    /// refuses instead. Restarting recovers, because `open` repairs the tail.
+    #[test]
+    fn a_poisoned_writer_refuses_to_append_rather_than_writing_onto_an_unknown_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let mut writer = LogWriter::open(&path, 0).unwrap();
+        writer.append(sample_payload("committed")).unwrap();
+        let len_after_commit = std::fs::metadata(&path).unwrap().len();
+
+        writer.poisoned = true;
+
+        let err = writer.append(sample_payload("refused")).unwrap_err();
+        assert!(err.to_string().contains("poisoned"));
+        assert_eq!(
+            writer.next_seq(),
+            1,
+            "a refused append must not consume a sequence number"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            len_after_commit,
+            "a refused append must write nothing"
+        );
+
+        // A restart clears it: `open` re-establishes the record-boundary invariant.
+        let reopened = LogWriter::open(&path, 1).unwrap();
+        assert!(!reopened.poisoned);
     }
 
     #[test]
