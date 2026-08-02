@@ -67,6 +67,7 @@
 //! artifact. Compaction may duplicate work; it must never destroy recoverable
 //! history.
 
+use crate::model::TransitionPayload;
 use crate::stack::InterruptionStack;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -177,10 +178,149 @@ pub fn compact(
     log.sync_all()
 }
 
+/// Tracks progress toward ADR 0004's compaction trigger: *"clean shutdown **or**
+/// 500 user-triggered transitions (excluding heartbeats) since the last
+/// compaction, whichever comes first."*
+///
+/// A named type rather than a bare counter on `Inner`, because the rule has
+/// four parts that are easy to violate by accident and each one is encoded here
+/// instead of relying on callers to remember it:
+///
+/// - **Heartbeats never count.** ADR 0004 is explicit about why: a heads-down
+///   8-hour day with zero manual transitions still writes ~480 heartbeat lines,
+///   which would trigger compaction from heartbeat volume alone — not what the
+///   trigger is for.
+/// - **`Rename` and `RecoverGap` never count either.** ADR 0004's list is
+///   exhaustive: start / switch / interrupt / return-previous / return-original
+///   / complete. `Rename` is user-triggered but not a lifecycle transition (it
+///   opens and closes nothing); `RecoverGap` is not user-triggered at all.
+/// - **Replay never counts.** By construction — replay drives
+///   `InterruptionStack::apply` directly and never touches this type, so
+///   rebuilding a million-line log advances nothing.
+/// - **Successful compaction resets it.** Nothing else may.
+#[derive(Debug, Default)]
+pub struct CompactionTrigger {
+    user_transitions_since_compaction: u32,
+    /// Watermark of the last compaction this process performed. Distinguishes
+    /// "nothing new since the snapshot" from "never compacted", so a shutdown
+    /// immediately after a threshold compaction does not redo identical work.
+    last_compacted_watermark: Option<u64>,
+}
+
+impl CompactionTrigger {
+    /// ADR 0004: **not measured, chosen as a low-cost default** — the same
+    /// honest framing the 60-second heartbeat interval uses. Revisit if startup
+    /// replay time is ever actually observed to be a problem.
+    pub const THRESHOLD: u32 = 500;
+
+    pub fn record(&mut self, payload: &TransitionPayload) {
+        if counts_toward_compaction(payload) {
+            self.user_transitions_since_compaction += 1;
+        }
+    }
+
+    pub fn count(&self) -> u32 {
+        self.user_transitions_since_compaction
+    }
+
+    /// True once the threshold is reached **and** there is genuinely new work on
+    /// disk. Both halves matter: the first is ADR 0004's rule, the second stops
+    /// the same state being compacted twice.
+    pub fn should_compact(&self, next_seq: u64) -> bool {
+        self.user_transitions_since_compaction >= Self::THRESHOLD && self.has_uncompacted_work(next_seq)
+    }
+
+    /// The clean-shutdown arm. No threshold — any uncompacted work is worth
+    /// snapshotting on the way out, since it makes the next startup cheaper and
+    /// there is no next transition to wait for.
+    pub fn has_uncompacted_work(&self, next_seq: u64) -> bool {
+        next_seq > 0 && self.last_compacted_watermark != Some(next_seq - 1)
+    }
+
+    pub fn reset(&mut self, compacted_watermark: u64) {
+        self.user_transitions_since_compaction = 0;
+        self.last_compacted_watermark = Some(compacted_watermark);
+    }
+}
+
+fn counts_toward_compaction(payload: &TransitionPayload) -> bool {
+    use TransitionPayload::*;
+    match payload {
+        Start { .. } | Switch { .. } | Interrupt { .. } | ReturnPrevious | ReturnOriginal | Complete => true,
+        // Enumerated rather than a catch-all `_ => false`, so adding a
+        // transition forces a decision here instead of silently defaulting.
+        Heartbeat | Rename { .. } | RecoverGap { .. } => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{TimeBlock, TransitionPayload};
+    use crate::model::TimeBlock;
+
+    fn start(n: &str) -> TransitionPayload {
+        TransitionPayload::Start { name: n.into(), project: None, client: None }
+    }
+
+    #[test]
+    fn only_user_triggered_lifecycle_transitions_count_toward_the_threshold() {
+        let mut trigger = CompactionTrigger::default();
+
+        for payload in [
+            TransitionPayload::Heartbeat,
+            TransitionPayload::Rename { name: "x".into(), project: None, client: None },
+            TransitionPayload::RecoverGap { inferred_end: Utc::now() },
+        ] {
+            trigger.record(&payload);
+        }
+        assert_eq!(trigger.count(), 0, "heartbeats, renames and gap recovery must not advance the trigger");
+
+        for payload in [
+            start("a"),
+            TransitionPayload::Switch { name: "b".into(), project: None, client: None },
+            TransitionPayload::Interrupt { name: "c".into(), project: None, client: None },
+            TransitionPayload::ReturnPrevious,
+            TransitionPayload::ReturnOriginal,
+            TransitionPayload::Complete,
+        ] {
+            trigger.record(&payload);
+        }
+        assert_eq!(trigger.count(), 6, "all six lifecycle transitions count");
+    }
+
+    #[test]
+    fn the_threshold_fires_at_exactly_adr_0004s_number() {
+        let mut trigger = CompactionTrigger::default();
+        for _ in 0..CompactionTrigger::THRESHOLD - 1 {
+            trigger.record(&start("x"));
+        }
+        assert!(!trigger.should_compact(9_999));
+        trigger.record(&start("x"));
+        assert!(trigger.should_compact(9_999));
+    }
+
+    /// Compaction must not repeat for state already snapshotted — otherwise a
+    /// clean shutdown straight after a threshold compaction rewrites an
+    /// identical snapshot and re-truncates an already-empty log.
+    #[test]
+    fn the_same_state_is_never_compacted_twice() {
+        let mut trigger = CompactionTrigger::default();
+        assert!(!trigger.has_uncompacted_work(0), "an empty log has nothing to compact");
+
+        for _ in 0..CompactionTrigger::THRESHOLD {
+            trigger.record(&start("x"));
+        }
+        assert!(trigger.should_compact(500));
+
+        trigger.reset(499);
+        assert_eq!(trigger.count(), 0);
+        assert!(!trigger.should_compact(500), "threshold cleared");
+        assert!(!trigger.has_uncompacted_work(500), "and nothing new is on disk");
+
+        trigger.record(&start("later"));
+        assert!(trigger.has_uncompacted_work(501), "a single new transition is uncompacted work again");
+        assert!(!trigger.should_compact(501), "but it is nowhere near the threshold");
+    }
 
     fn stack_with_active(name: &str) -> InterruptionStack {
         let mut stack = InterruptionStack::new();

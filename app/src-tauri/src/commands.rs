@@ -104,7 +104,14 @@ pub fn apply_transition(
         .map_err(|e| format!("internal inconsistency after a validated dry-run: {e}"))?;
     inner.last_activity_at = record.timestamp;
 
-    Ok(StackView::from(&inner.stack))
+    // ADR 0004's threshold arm. Runs after the transition is durable and
+    // applied, so a compaction failure can never affect whether the user's
+    // action succeeded.
+    inner.compaction.record(&record.payload);
+    let view = StackView::from(&inner.stack);
+    crate::state::compact_if_due(&mut inner);
+
+    Ok(view)
 }
 
 /// A UTC instant marking the start of "today" in the host's local timezone —

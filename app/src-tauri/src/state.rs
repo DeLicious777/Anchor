@@ -3,12 +3,12 @@
 //! other, under the same lock).
 
 use crate::log::reader::replay;
-use crate::log::snapshot::Snapshot;
+use crate::log::snapshot::{compact, CompactionTrigger, Snapshot};
 use crate::log::writer::LogWriter;
 use crate::model::TransitionPayload;
 use crate::stack::InterruptionStack;
 use chrono::{DateTime, Utc};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub struct AppState {
@@ -22,6 +22,52 @@ pub struct Inner {
     /// heartbeats) — read by the heartbeat and live sleep/hibernate-resume logic
     /// to decide how stale the currently-active entry's last known-alive point is.
     pub last_activity_at: DateTime<Utc>,
+    /// Progress toward ADR 0004's compaction trigger. Deliberately **not**
+    /// persisted: no accepted invariant requires compaction to fire at exactly
+    /// N since the last one, so a restart resetting it delays compaction and
+    /// violates nothing. See `log::snapshot`.
+    pub compaction: CompactionTrigger,
+    /// Where `compact` writes. Held here so the trigger can fire from wherever
+    /// a transition is applied, without threading a path through every caller.
+    pub snapshot_path: PathBuf,
+}
+
+/// Snapshot the current projection and truncate the log, if the trigger says so.
+///
+/// Failure is deliberately **not** propagated to the caller. Compaction is an
+/// optimisation of startup replay, never a source of truth — a failed
+/// compaction leaves the log intact and fully replayable, so turning it into a
+/// user-visible error for a transition that already succeeded durably would
+/// report a problem the user has not got. It is reported and the trigger is
+/// left unreset, so the next transition simply tries again.
+pub fn compact_if_due(inner: &mut Inner) {
+    let next_seq = inner.writer.next_seq();
+    if !inner.compaction.should_compact(next_seq) {
+        return;
+    }
+    let watermark = next_seq - 1;
+    let snapshot = Snapshot::new(watermark, inner.stack.clone(), inner.last_activity_at);
+    match compact(&inner.snapshot_path, inner.writer.path(), &snapshot) {
+        Ok(()) => inner.compaction.reset(watermark),
+        Err(e) => eprintln!("compaction failed, log left intact and will be retried: {e}"),
+    }
+}
+
+/// The clean-shutdown arm of ADR 0004's trigger. No threshold — on the way out,
+/// any uncompacted work is worth snapshotting, because it makes the next
+/// startup cheaper and there is no next transition to wait for.
+pub fn compact_on_shutdown(state: &AppState) {
+    let Ok(mut inner) = state.inner.lock() else { return };
+    let next_seq = inner.writer.next_seq();
+    if !inner.compaction.has_uncompacted_work(next_seq) {
+        return;
+    }
+    let watermark = next_seq - 1;
+    let snapshot = Snapshot::new(watermark, inner.stack.clone(), inner.last_activity_at);
+    match compact(&inner.snapshot_path, inner.writer.path(), &snapshot) {
+        Ok(()) => inner.compaction.reset(watermark),
+        Err(e) => eprintln!("shutdown compaction failed, log left intact: {e}"),
+    }
 }
 
 /// What happened during `AppState::init`, so the caller can surface it (this
@@ -47,8 +93,9 @@ impl AppState {
         snapshot_path: impl AsRef<Path>,
     ) -> Result<(Self, InitReport), Box<dyn std::error::Error>> {
         let path = path.as_ref();
+        let snapshot_path = snapshot_path.as_ref().to_path_buf();
 
-        let snapshot = Snapshot::load(snapshot_path);
+        let snapshot = Snapshot::load(&snapshot_path);
         let (watermark, starting_stack, snapshot_activity) = match snapshot {
             Some(s) => (Some(s.watermark), Some(s.stack), Some(s.last_activity_at)),
             None => (None, None, None),
@@ -86,7 +133,13 @@ impl AppState {
         }
 
         let state = AppState {
-            inner: Mutex::new(Inner { stack, writer, last_activity_at }),
+            inner: Mutex::new(Inner {
+                stack,
+                writer,
+                last_activity_at,
+                compaction: CompactionTrigger::default(),
+                snapshot_path,
+            }),
         };
         Ok((state, InitReport { torn_line_discarded: result.torn_line_discarded, startup_gap_recovered }))
     }
@@ -219,6 +272,110 @@ mod tests {
         let inner = state.inner.lock().unwrap();
         assert_eq!(inner.stack.closed.len(), 1);
         assert_eq!(inner.stack.closed[0].name, "work");
+    }
+
+    /// The threshold arm, end to end: transitions accumulate through the real
+    /// command path, compaction fires on its own, and the projection survives a
+    /// restart from a snapshot plus a truncated log.
+    #[test]
+    fn the_threshold_arm_fires_and_the_projection_survives_the_restart() {
+        use crate::commands::apply_transition;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+        let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+
+        // One Start, then Switch until the threshold is crossed.
+        apply_transition(&state, |_| TransitionPayload::Start {
+            name: "t0".into(),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+        for i in 1..CompactionTrigger::THRESHOLD {
+            apply_transition(&state, move |_| TransitionPayload::Switch {
+                name: format!("t{i}"),
+                project: None,
+                client: None,
+            })
+            .unwrap();
+        }
+
+        {
+            let inner = state.inner.lock().unwrap();
+            assert_eq!(inner.compaction.count(), 0, "the trigger reset, so compaction ran");
+        }
+        assert!(snapshot_path.exists(), "a snapshot was written");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "and the log was truncated");
+        drop(state);
+
+        let (restarted, report) = AppState::init(&path, &snapshot_path).unwrap();
+        assert!(report.startup_gap_recovered, "t499 was still active when compaction ran");
+        let inner = restarted.inner.lock().unwrap();
+        assert_eq!(
+            inner.stack.closed.len() as u32,
+            CompactionTrigger::THRESHOLD,
+            "every block survives the snapshot round-trip"
+        );
+    }
+
+    /// Heartbeats must never drive compaction. ADR 0004 is explicit: a
+    /// heads-down day with no manual transitions still writes ~480 heartbeat
+    /// lines, and compacting on that volume is not what the trigger is for.
+    #[test]
+    fn heartbeats_alone_never_trigger_compaction() {
+        use crate::commands::apply_transition;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+        let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+
+        apply_transition(&state, |_| TransitionPayload::Start {
+            name: "heads down".into(),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+        for _ in 0..CompactionTrigger::THRESHOLD + 100 {
+            apply_transition(&state, |_| TransitionPayload::Heartbeat).unwrap();
+        }
+
+        let inner = state.inner.lock().unwrap();
+        assert_eq!(inner.compaction.count(), 1, "only the Start counted");
+        assert!(!snapshot_path.exists(), "no compaction from heartbeat volume alone");
+    }
+
+    /// The shutdown arm has no threshold, but it must still not redo work.
+    #[test]
+    fn shutdown_compacts_pending_work_once_and_not_again() {
+        use crate::commands::apply_transition;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+        let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+
+        apply_transition(&state, |_| TransitionPayload::Start {
+            name: "brief".into(),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+        apply_transition(&state, |_| TransitionPayload::Complete).unwrap();
+
+        compact_on_shutdown(&state);
+        assert!(snapshot_path.exists());
+        let after_first = std::fs::metadata(&snapshot_path).unwrap().modified().unwrap();
+
+        // A second call with nothing new must be a no-op, not an identical rewrite.
+        compact_on_shutdown(&state);
+        assert_eq!(
+            std::fs::metadata(&snapshot_path).unwrap().modified().unwrap(),
+            after_first,
+            "the same state must never be compacted twice"
+        );
     }
 
     /// The quiet case: compaction with nothing running. No gap to recover, and

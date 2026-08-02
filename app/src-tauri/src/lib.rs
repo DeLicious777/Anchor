@@ -141,6 +141,18 @@ pub fn run() {
             commands::get_hotkey_bindings,
             commands::update_hotkey_bindings,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|handle, event| {
+            // ADR 0004's clean-shutdown arm of the compaction trigger. Exit is
+            // the last moment the projection is known-good in memory, and there
+            // is no next transition to wait for. A failure here is logged and
+            // ignored: the log is left intact and fully replayable, so the only
+            // cost is a slower next startup.
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(state) = handle.try_state::<AppState>() {
+                    state::compact_on_shutdown(&state);
+                }
+            }
+        });
 }
