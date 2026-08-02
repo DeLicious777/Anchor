@@ -128,6 +128,13 @@ Record **date, commit SHA, OS and build version**, plus anything unusual about t
 
 This is the artifact that makes future failures interpretable. Without a dated clean run, a later failure raises "did this ever work?"; with one, it is a **regression against a known-good commit**, which is a far cheaper question to answer.
 
+**Tag the commit `validated-baseline-N`** (sequential, like ADRs), with a message naming the date and outcome. The project already marks *accepted architecture*; this marks something different and worth distinguishing:
+
+> **Accepted** means we believe this architecture is correct.
+> **Validated** means we have exercised the complete system and observed it behaving correctly.
+
+Everything after a validated baseline can be measured against it. Nothing before one can.
+
 ### 🟡 Finding — one or more steps failed, but data integrity is intact
 
 Finish the remaining steps if it is safe to do so — a single pass often surfaces more than one thing, and stopping early wastes the setup. Then open an issue per finding, link it here, and classify each one:
