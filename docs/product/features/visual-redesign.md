@@ -210,7 +210,7 @@ Owned by the ux-designer. This section defines the **system**, not the screens; 
   The commitments come from `interruption-stack.md` and `timeline-reconstruction.md`; the redesign is where they get a visual form. **Partly real already**: `+page.svelte:589-590, 692-699` renders an inferred end in italic — non-colour by deliberate choice, with a comment saying so. That is the existing precedent to extend, not replace.
 - **Motion**: the design system leaves it unspecified. Adopt one rule — 150–200ms ease-out for state changes, nothing decorative, nothing that delays a capture action. **The duration is provisional and unvalidated** (`principles.md` #7): it is a conventional default, not a measured one. **Revisit if** any animation is perceptible as lag on a capture action, or if #14's drag feedback needs a different response curve — in which case the drag case gets its own value rather than this one being stretched to cover it.
 
-**Deferred to #14, not decided here**: drag affordances and hit targets, how a clamp is visually communicated, undo presentation, zoom and time-range controls, minimum rendered block size, and orientation. This doc gives that work a spacing scale, a density baseline, and a component set to build from.
+**Deferred to #14, not decided here**: drag affordances and hit targets, how a clamp is visually communicated, zoom and time-range controls, minimum rendered block size, and orientation. This doc gives that work a spacing scale, a density baseline, and a component set to build from.
 
 ## Technical Constraints
 
