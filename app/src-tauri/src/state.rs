@@ -127,7 +127,7 @@ impl AppState {
                 .expect("active entry survived replay but neither the log nor the snapshot supplied a last-activity timestamp");
 
             let record = writer.append(TransitionPayload::RecoverGap { inferred_end })?;
-            stack.apply(&record.payload, record.timestamp)?;
+            stack.apply(&record.payload, record.timestamp, record.seq)?;
             last_activity_at = record.timestamp;
             startup_gap_recovered = true;
         }

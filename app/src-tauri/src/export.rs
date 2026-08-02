@@ -154,7 +154,7 @@ mod tests {
     }
 
     fn closed_block(name: &str, project: Option<&str>, start_offset: i64, duration_secs: i64) -> TimeBlock {
-        let mut b = TimeBlock::new(name.into(), project.map(String::from), None, t(start_offset));
+        let mut b = TimeBlock::new(name.into(), project.map(String::from), None, t(start_offset), start_offset.unsigned_abs());
         b.end = Some(t(start_offset + duration_secs));
         b.end_determination = Some(EndDetermination::UserDetermined);
         b
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn active_entry_in_range_is_included_with_elapsed_so_far_duration_and_is_not_mutated() {
-        let active = TimeBlock::new("C".into(), None, None, t(0));
+        let active = TimeBlock::new("C".into(), None, None, t(0), 0);
         let now = t(120);
         let result = blocks_in_range(&[], Some(&active), t(-10), t(3600), now);
 

@@ -80,7 +80,7 @@ pub fn replay(
         let already_in_snapshot = watermark.is_some_and(|w| record.seq <= w);
         if !already_in_snapshot {
             stack
-                .apply(&record.payload, record.timestamp)
+                .apply(&record.payload, record.timestamp, record.seq)
                 .map_err(|source| ReplayError::Inconsistent { seq: record.seq, source })?;
         }
     }
@@ -139,6 +139,63 @@ mod tests {
             "but its last-known-alive point does not — it lived in the truncated lines"
         );
         assert_eq!(after.next_seq, watermark + 1, "seq still continues correctly from the watermark");
+    }
+
+    /// **The criterion ADR 0006 exists to satisfy.** Replaying the same log
+    /// twice must produce the same ids — otherwise a reconstruction transition
+    /// written in one session names a block that does not exist in the next,
+    /// replay escalates it to `ReplayError::Inconsistent`, and the app will not
+    /// start.
+    #[test]
+    fn replaying_the_same_log_twice_yields_identical_time_block_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        {
+            let mut writer = LogWriter::open(&path, 0).unwrap();
+            writer.append(payload("A")).unwrap();
+            writer
+                .append(TransitionPayload::Interrupt { name: "B".into(), project: None, client: None })
+                .unwrap();
+            writer.append(TransitionPayload::ReturnPrevious).unwrap();
+            writer.append(TransitionPayload::Complete).unwrap();
+        }
+
+        let first: Vec<_> = replay(&path, None, None).unwrap().stack.closed.iter().map(|b| b.id).collect();
+        let second: Vec<_> = replay(&path, None, None).unwrap().stack.closed.iter().map(|b| b.id).collect();
+
+        assert!(!first.is_empty());
+        assert_eq!(first, second, "identity is a reading of the log, not a fresh value per run");
+    }
+
+    /// Uniqueness across a full replay, asserted rather than assumed. It used to
+    /// be a free consequence of `Uuid::new_v4()`; under a derivation it is a
+    /// consequence of `seq` uniqueness, and a collision would resolve the *wrong*
+    /// block silently — `resolve_paused` and `derived_status` both key on `id`.
+    #[test]
+    fn no_two_time_blocks_share_an_id_after_a_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        {
+            let mut writer = LogWriter::open(&path, 0).unwrap();
+            writer.append(payload("root")).unwrap();
+            for i in 0..24 {
+                writer
+                    .append(TransitionPayload::Interrupt {
+                        name: format!("task-{i}"),
+                        project: None,
+                        client: None,
+                    })
+                    .unwrap();
+            }
+        }
+
+        let stack = replay(&path, None, None).unwrap().stack;
+        let mut ids: Vec<_> = stack.closed.iter().map(|b| b.id).collect();
+        ids.extend(stack.active.iter().map(|b| b.id));
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+
+        assert_eq!(ids.len(), 25, "24 closed plus the one still active");
+        assert_eq!(unique.len(), ids.len(), "every block has a distinct id");
     }
 
     #[test]
@@ -352,11 +409,10 @@ mod tests {
         // then Interrupt B (i.e. A paused/pending, B active).
         let seed = || {
             let mut s = InterruptionStack::new();
-            s.apply(&payload("A"), chrono::Utc::now()).unwrap();
+            s.apply(&payload("A"), chrono::Utc::now(), 1001).unwrap();
             s.apply(
                 &TransitionPayload::Interrupt { name: "B".into(), project: None, client: None },
-                chrono::Utc::now(),
-            )
+                chrono::Utc::now(), 1002)
             .unwrap();
             s
         };

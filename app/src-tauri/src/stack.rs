@@ -94,13 +94,18 @@ impl InterruptionStack {
     /// Apply one transition. The single entry point used by both live commands
     /// and log replay, so the two paths can never disagree about what a
     /// transition means.
-    pub fn apply(&mut self, payload: &TransitionPayload, timestamp: DateTime<Utc>) -> Result<(), StackError> {
+    /// `seq` is the sequence number of the log line carrying this transition.
+    /// It is the sole input to the identity of any Time Block this creates
+    /// (ADR 0006), which is why it is threaded here rather than left to the
+    /// constructor: replay passes the `seq` it read, the live path passes the
+    /// `seq` the writer is about to assign, and both produce identical ids.
+    pub fn apply(&mut self, payload: &TransitionPayload, timestamp: DateTime<Utc>, seq: u64) -> Result<(), StackError> {
         match payload {
             TransitionPayload::Start { name, project, client } => {
                 if self.active.is_some() {
                     return Err(StackError::AlreadyActive);
                 }
-                self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp));
+                self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp, seq));
                 Ok(())
             }
             TransitionPayload::Switch { name, project, client } => {
@@ -108,7 +113,7 @@ impl InterruptionStack {
                 current.end = Some(timestamp);
                 current.end_determination = Some(EndDetermination::UserDetermined);
                 self.closed.push(current);
-                self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp));
+                self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp, seq));
                 Ok(())
             }
             TransitionPayload::Interrupt { name, project, client } => {
@@ -132,7 +137,7 @@ impl InterruptionStack {
                 };
                 self.closed.push(current);
                 self.stack.push(frame);
-                self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp));
+                self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp, seq));
                 Ok(())
             }
             TransitionPayload::Rename { name, project, client } => {
@@ -151,7 +156,7 @@ impl InterruptionStack {
                 self.close_active_if_any(timestamp);
 
                 self.resolve_paused(frame.paused_time_block_id, InterruptionOutcome::Resumed)?;
-                self.active = Some(TimeBlock::new(frame.name, frame.project, frame.client, timestamp));
+                self.active = Some(TimeBlock::new(frame.name, frame.project, frame.client, timestamp, seq));
                 Ok(())
             }
             TransitionPayload::ReturnOriginal => {
@@ -170,7 +175,7 @@ impl InterruptionStack {
                 // Return to Previous's target.
                 let root = self.stack.pop().expect("stack was non-empty");
                 self.resolve_paused(root.paused_time_block_id, InterruptionOutcome::Resumed)?;
-                self.active = Some(TimeBlock::new(root.name, root.project, root.client, timestamp));
+                self.active = Some(TimeBlock::new(root.name, root.project, root.client, timestamp, seq));
                 Ok(())
             }
             TransitionPayload::Complete => {
@@ -268,8 +273,7 @@ mod tests {
         stack
             .apply(
                 &TransitionPayload::Start { name: name.into(), project: None, client: None },
-                t(at),
-            )
+                t(at), at.unsigned_abs())
             .unwrap();
     }
 
@@ -277,8 +281,7 @@ mod tests {
         stack
             .apply(
                 &TransitionPayload::Interrupt { name: name.into(), project: None, client: None },
-                t(at),
-            )
+                t(at), at.unsigned_abs())
             .unwrap();
     }
 
@@ -292,7 +295,7 @@ mod tests {
     fn derived_status_distinguishes_pending_from_never_interrupted() {
         let mut s = InterruptionStack::new();
         start(&mut s, "A", 0);
-        s.apply(&TransitionPayload::Switch { name: "B".into(), project: None, client: None }, t(10))
+        s.apply(&TransitionPayload::Switch { name: "B".into(), project: None, client: None }, t(10), 11)
             .unwrap();
         interrupt(&mut s, "C", 20);
 
@@ -313,7 +316,7 @@ mod tests {
         start(&mut s, "A", 0);
         interrupt(&mut s, "B", 10);
         interrupt(&mut s, "C", 20);
-        s.apply(&TransitionPayload::ReturnOriginal, t(30)).unwrap();
+        s.apply(&TransitionPayload::ReturnOriginal, t(30), 31).unwrap();
 
         let a = s.closed.iter().find(|b| b.name == "A").unwrap();
         let b = s.closed.iter().find(|b| b.name == "B").unwrap();
@@ -330,7 +333,7 @@ mod tests {
         let mut s = InterruptionStack::new();
         start(&mut s, "A", 0);
         interrupt(&mut s, "B", 10);
-        s.apply(&TransitionPayload::RecoverGap { inferred_end: t(15) }, t(20)).unwrap();
+        s.apply(&TransitionPayload::RecoverGap { inferred_end: t(15) }, t(20), 21).unwrap();
 
         assert!(s.closed.iter().all(|b| b.capture_origin == CaptureOrigin::LiveCapture));
         assert!(s.closed.iter().all(|b| !b.capture_origin.is_adjusted()));
@@ -355,7 +358,7 @@ mod tests {
         let mut s = InterruptionStack::new();
         start(&mut s, "A", 0);
         interrupt(&mut s, "B", 10);
-        s.apply(&TransitionPayload::RecoverGap { inferred_end: t(15) }, t(20)).unwrap();
+        s.apply(&TransitionPayload::RecoverGap { inferred_end: t(15) }, t(20), 21).unwrap();
 
         assert!(s.active.is_none(), "gap recovery must not auto-resume");
         assert_eq!(s.stack_depth(), 1, "A's frame survives the crash");
@@ -372,7 +375,7 @@ mod tests {
         let mut s = crashed_mid_interruption();
         let a_id = s.closed[0].id;
 
-        s.apply(&TransitionPayload::ReturnPrevious, t(30)).unwrap();
+        s.apply(&TransitionPayload::ReturnPrevious, t(30), 31).unwrap();
 
         assert_eq!(s.stack_depth(), 0, "the orphaned frame is resolved");
         assert_eq!(s.active.as_ref().unwrap().name, "A", "resumed without a synthetic Start");
@@ -394,14 +397,14 @@ mod tests {
         start(&mut s, "A", 0);
         interrupt(&mut s, "B", 10);
         interrupt(&mut s, "C", 20);
-        s.apply(&TransitionPayload::RecoverGap { inferred_end: t(25) }, t(30)).unwrap();
+        s.apply(&TransitionPayload::RecoverGap { inferred_end: t(25) }, t(30), 31).unwrap();
         assert!(s.active.is_none());
         assert_eq!(s.stack_depth(), 2);
 
         let a_id = s.closed[0].id;
         let b_id = s.closed[1].id;
 
-        s.apply(&TransitionPayload::ReturnOriginal, t(40)).unwrap();
+        s.apply(&TransitionPayload::ReturnOriginal, t(40), 41).unwrap();
 
         assert_eq!(s.stack_depth(), 0);
         assert_eq!(s.active.as_ref().unwrap().name, "A");
@@ -422,7 +425,7 @@ mod tests {
     fn complete_is_still_rejected_after_crash_recovery_with_an_open_stack() {
         let mut s = crashed_mid_interruption();
         assert_eq!(
-            s.apply(&TransitionPayload::Complete, t(30)),
+            s.apply(&TransitionPayload::Complete, t(30), 31),
             Err(StackError::CannotCompleteWithOpenStack)
         );
     }
@@ -435,7 +438,7 @@ mod tests {
         let mut s = InterruptionStack::new();
         start(&mut s, "A", 0);
 
-        assert_eq!(s.apply(&TransitionPayload::ReturnPrevious, t(10)), Err(StackError::StackEmpty));
+        assert_eq!(s.apply(&TransitionPayload::ReturnPrevious, t(10), 11), Err(StackError::StackEmpty));
         assert_eq!(s.active.as_ref().unwrap().name, "A", "the active block survives the rejection");
         assert!(s.closed.is_empty());
     }
@@ -446,8 +449,7 @@ mod tests {
         start(&mut s, "A", 0);
         s.apply(
             &TransitionPayload::Switch { name: "B".into(), project: None, client: None },
-            t(10),
-        )
+            t(10), 11)
         .unwrap();
 
         assert_eq!(s.stack_depth(), 0);
@@ -480,7 +482,7 @@ mod tests {
         interrupt(&mut s, "B", 10);
         let a_id = s.closed[0].id;
 
-        s.apply(&TransitionPayload::ReturnPrevious, t(20)).unwrap();
+        s.apply(&TransitionPayload::ReturnPrevious, t(20), 21).unwrap();
 
         assert_eq!(s.stack_depth(), 0);
         // B closed explicitly, A resolved explicitly, new "A" block created (not reopened).
@@ -505,7 +507,7 @@ mod tests {
         let a_id = s.closed[0].id;
         let b_id = s.closed[1].id;
 
-        s.apply(&TransitionPayload::ReturnOriginal, t(30)).unwrap();
+        s.apply(&TransitionPayload::ReturnOriginal, t(30), 31).unwrap();
 
         assert_eq!(s.stack_depth(), 0);
         let resolved_a = s.closed.iter().find(|b| b.id == a_id).unwrap();
@@ -524,7 +526,7 @@ mod tests {
         start(&mut s, "A", 0);
 
         let inferred_end = t(5); // e.g. the last heartbeat before a crash/sleep
-        s.apply(&TransitionPayload::RecoverGap { inferred_end }, t(100)).unwrap();
+        s.apply(&TransitionPayload::RecoverGap { inferred_end }, t(100), 101).unwrap();
 
         assert_eq!(s.closed.len(), 1);
         assert_eq!(s.closed[0].name, "A");
@@ -537,7 +539,7 @@ mod tests {
     fn recover_gap_requires_an_active_task() {
         let mut s = InterruptionStack::new();
         let err = s
-            .apply(&TransitionPayload::RecoverGap { inferred_end: t(0) }, t(10))
+            .apply(&TransitionPayload::RecoverGap { inferred_end: t(0) }, t(10), 11)
             .unwrap_err();
         assert_eq!(err, StackError::NoActiveTask);
     }
@@ -547,7 +549,7 @@ mod tests {
         let mut s = InterruptionStack::new();
         start(&mut s, "A", 0);
         interrupt(&mut s, "B", 10);
-        let err = s.apply(&TransitionPayload::Complete, t(20)).unwrap_err();
+        let err = s.apply(&TransitionPayload::Complete, t(20), 21).unwrap_err();
         assert_eq!(err, StackError::CannotCompleteWithOpenStack);
     }
 
@@ -562,7 +564,7 @@ mod tests {
         assert_eq!(s.active.as_ref().unwrap().name, "task-12");
 
         for i in (0..12).rev() {
-            s.apply(&TransitionPayload::ReturnPrevious, t(200 + (12 - i) * 10)).unwrap();
+            s.apply(&TransitionPayload::ReturnPrevious, t(200 + (12 - i) * 10), (200 + (12 - i) * 10) as u64).unwrap();
             assert_eq!(s.active.as_ref().unwrap().name, format!("task-{i}"));
         }
         assert_eq!(s.stack_depth(), 0);
@@ -579,7 +581,7 @@ mod tests {
         }
         assert_eq!(s.stack_depth(), 12);
 
-        s.apply(&TransitionPayload::ReturnOriginal, t(500)).unwrap();
+        s.apply(&TransitionPayload::ReturnOriginal, t(500), 501).unwrap();
 
         assert_eq!(s.stack_depth(), 0);
         assert_eq!(s.active.as_ref().unwrap().name, "root");
@@ -596,7 +598,7 @@ mod tests {
         let mut s = InterruptionStack::new();
         start(&mut s, "A", 0);
         let err = s
-            .apply(&TransitionPayload::Start { name: "B".into(), project: None, client: None }, t(10))
+            .apply(&TransitionPayload::Start { name: "B".into(), project: None, client: None }, t(10), 11)
             .unwrap_err();
         assert_eq!(err, StackError::AlreadyActive);
     }
@@ -605,7 +607,7 @@ mod tests {
     fn return_previous_rejects_when_stack_empty() {
         let mut s = InterruptionStack::new();
         start(&mut s, "A", 0);
-        let err = s.apply(&TransitionPayload::ReturnPrevious, t(10)).unwrap_err();
+        let err = s.apply(&TransitionPayload::ReturnPrevious, t(10), 11).unwrap_err();
         assert_eq!(err, StackError::StackEmpty);
     }
 
@@ -615,8 +617,7 @@ mod tests {
         start(&mut s, "Anchor 1", 0);
         s.apply(
             &TransitionPayload::Rename { name: "Real name".into(), project: Some("Acme".into()), client: None },
-            t(5),
-        )
+            t(5), 6)
         .unwrap();
 
         let active = s.active.as_ref().unwrap();
@@ -631,7 +632,7 @@ mod tests {
     fn rename_requires_an_active_task() {
         let mut s = InterruptionStack::new();
         let err = s
-            .apply(&TransitionPayload::Rename { name: "X".into(), project: None, client: None }, t(0))
+            .apply(&TransitionPayload::Rename { name: "X".into(), project: None, client: None }, t(0), 1)
             .unwrap_err();
         assert_eq!(err, StackError::NoActiveTask);
     }
@@ -646,7 +647,7 @@ mod tests {
     fn next_default_name_increments_past_existing_anchor_names_started_today() {
         let mut s = InterruptionStack::new();
         start(&mut s, "Anchor 1", 0);
-        s.apply(&TransitionPayload::Switch { name: "Anchor 2".into(), project: None, client: None }, t(10))
+        s.apply(&TransitionPayload::Switch { name: "Anchor 2".into(), project: None, client: None }, t(10), 11)
             .unwrap();
         assert_eq!(s.next_default_name(t(-100)), "Anchor 3");
     }

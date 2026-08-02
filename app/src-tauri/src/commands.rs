@@ -94,13 +94,13 @@ pub fn apply_transition(
     // Dry-run: reject before writing anything durable if this would fail.
     let mut check = inner.stack.clone();
     check
-        .apply(&payload, chrono::Utc::now())
+        .apply(&payload, chrono::Utc::now(), inner.writer.next_seq())
         .map_err(|e| e.to_string())?;
 
     let record = inner.writer.append(payload).map_err(|e| e.to_string())?;
     inner
         .stack
-        .apply(&record.payload, record.timestamp)
+        .apply(&record.payload, record.timestamp, record.seq)
         .map_err(|e| format!("internal inconsistency after a validated dry-run: {e}"))?;
     inner.last_activity_at = record.timestamp;
 
@@ -539,12 +539,14 @@ mod tests {
 
         assert!(post_restart_view.active.is_none());
         assert_eq!(pre_drop_view.closed.len(), post_restart_view.closed.len());
-        // Time Block IDs are freshly random per `TimeBlock::new()` call, so
-        // replay naturally produces different IDs than the original run — by
-        // design, nothing relies on stable IDs across restarts (Time Blocks are
-        // independent flat entries, aggregated by name/project/client, not ID).
-        // What must match is everything that actually carries meaning.
+        // **Identity survives the restart** (ADR 0006). This assertion used to
+        // say the opposite — that ids were freshly random per `TimeBlock::new()`
+        // and nothing relied on them being stable — which was true until
+        // reconstruction needed to name a block written in an earlier session.
+        // Ids now derive from the `seq` of the creating transition, so the same
+        // log yields the same ids on every replay, forever.
         for (pre, post) in pre_drop_view.closed.iter().zip(post_restart_view.closed.iter()) {
+            assert_eq!(pre.block.id, post.block.id, "a block keeps its identity across a restart");
             assert_eq!(pre.block.name, post.block.name);
             assert_eq!(pre.block.project, post.block.project);
             assert_eq!(pre.block.client, post.block.client);

@@ -328,6 +328,7 @@ mod tests {
             .apply(
                 &TransitionPayload::Start { name: name.into(), project: None, client: None },
                 Utc::now(),
+                0,
             )
             .unwrap();
         stack
@@ -362,6 +363,7 @@ mod tests {
             .apply(
                 &TransitionPayload::Interrupt { name: "phone".into(), project: None, client: None },
                 Utc::now(),
+                1,
             )
             .unwrap();
         let closed_ids: Vec<_> = stack.closed.iter().map(|b: &TimeBlock| b.id).collect();

@@ -180,7 +180,7 @@ mod tests {
     use super::*;
 
     fn active_block(name: &str, start: DateTime<Utc>) -> TimeBlock {
-        TimeBlock::new(name.to_string(), None, None, start)
+        TimeBlock::new(name.to_string(), None, None, start, 0)
     }
 
     #[test]

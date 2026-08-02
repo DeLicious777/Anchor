@@ -142,10 +142,39 @@ pub struct TimeBlock {
     pub interruption_outcome: Option<InterruptionOutcome>,
 }
 
+/// The fixed UUIDv5 namespace Time Block identity is derived under
+/// ([ADR 0006](../../../docs/decisions/0006-stable-persistent-time-block-identity.md)).
+///
+/// **Chosen once and never changed.** It is part of a durable on-disk contract
+/// from the moment any reconstruction transition references a derived id —
+/// altering it would silently re-identify every block in every log, orphaning
+/// every stored reference and leaving the app unable to start.
+pub const ANCHOR_NAMESPACE: Uuid = Uuid::from_bytes([
+    0xbe, 0xcb, 0xca, 0x30, 0x95, 0x8b, 0x45, 0x68, 0xa9, 0xec, 0xdd, 0x5e, 0xd1, 0xdb, 0xf6, 0x12,
+]);
+
+/// Derive a Time Block's identity from the `seq` of the transition that created
+/// it, per ADR 0006.
+///
+/// **The encoding is as load-bearing as the namespace and is equally fixed:**
+/// the hashed name is `seq`'s ASCII decimal form, unpadded and unprefixed.
+/// UUIDv5 hashes a byte string, so `b"42"`, `42u64.to_be_bytes()` and
+/// `42u64.to_le_bytes()` yield three different ids from the same number.
+/// Decimal is chosen because it matches how `seq` already appears in the log's
+/// JSON, so an id can be reproduced by hand from a log line.
+pub fn time_block_id(seq: u64) -> Uuid {
+    Uuid::new_v5(&ANCHOR_NAMESPACE, seq.to_string().as_bytes())
+}
+
 impl TimeBlock {
-    pub fn new(name: String, project: Option<String>, client: Option<String>, start: DateTime<Utc>) -> Self {
+    /// `seq` is the sequence number of the transition creating this block —
+    /// the sole input to its identity (ADR 0006). Replay passes the `seq` it
+    /// read; the live path passes the `seq` the writer is about to assign.
+    /// Both therefore produce the same id for the same block, on every replay,
+    /// forever — which is what makes a block referenceable across restarts.
+    pub fn new(name: String, project: Option<String>, client: Option<String>, start: DateTime<Utc>, seq: u64) -> Self {
         Self {
-            id: Uuid::new_v4(),
+            id: time_block_id(seq),
             name,
             project,
             client,
@@ -240,4 +269,45 @@ pub enum TransitionPayload {
     /// caller (see `state::resolve_startup_gap` vs. the Slice 2 power-resume path),
     /// not baked into this transition.
     RecoverGap { inferred_end: DateTime<Utc> },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The durable contract, pinned by assertion rather than by prose.**
+    ///
+    /// ADR 0006 fixes both the namespace and the encoding, and states the test
+    /// vectors these assert. A change to either — including a plausible-looking
+    /// byte transposition in the constant, which is exactly what this caught
+    /// while it was being written — silently re-identifies every block in every
+    /// log. Nothing else in the codebase would notice.
+    #[test]
+    fn time_block_identity_matches_adr_0006s_test_vectors() {
+        assert_eq!(
+            ANCHOR_NAMESPACE.to_string(),
+            "becbca30-958b-4568-a9ec-dd5ed1dbf612",
+            "the namespace constant must equal the one ADR 0006 fixes"
+        );
+
+        for (seq, expected) in [
+            (0u64, "18885148-20dd-5b7c-a7d3-d7844af7a220"),
+            (1, "24d50f72-3754-5b11-8e57-ec5329a394af"),
+            (42, "7d8aafb1-dfaf-59a2-bab1-d1a0a0f3e7f7"),
+        ] {
+            assert_eq!(time_block_id(seq).to_string(), expected, "id for seq {seq}");
+        }
+    }
+
+    /// The property the whole scheme exists for: the same log yields the same
+    /// ids every time it is read, so a reference written in one session still
+    /// resolves in the next.
+    #[test]
+    fn identity_is_stable_across_derivations_and_unique_per_seq() {
+        assert_eq!(time_block_id(7), time_block_id(7), "same seq, same id, always");
+        assert_ne!(time_block_id(7), time_block_id(8));
+
+        let ids: std::collections::HashSet<_> = (0..1_000).map(time_block_id).collect();
+        assert_eq!(ids.len(), 1_000, "no collisions across a realistic run of sequence numbers");
+    }
 }
