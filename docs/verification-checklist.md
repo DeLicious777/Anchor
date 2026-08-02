@@ -94,6 +94,30 @@ Watch: the edit resolves against the right block and survives. This is the one s
 
 ---
 
+## The evidence bundle
+
+**Capture this before starting, not after.** Two reasons: the commit must be the one you actually ran (not whatever `HEAD` is by the time you write it up), and in a 🔴 the operator is mid-incident and will not reliably remember to collect environment facts. Filling the header in first costs ten seconds and makes every run comparable to every other.
+
+Run this from the repo root — it emits the header ready to paste:
+
+```powershell
+$tz = Get-TimeZone; "commit:   $(git rev-parse --short HEAD)"; "branch:   $(git rev-parse --abbrev-ref HEAD)"; "os:       $((Get-CimInstance Win32_OperatingSystem).Caption) $([System.Environment]::OSVersion.Version)"; "timezone: $($tz.Id) (UTC$(if($tz.BaseUtcOffset.TotalHours -ge 0){'+'})$($tz.BaseUtcOffset.TotalHours)), DST now: $($tz.IsDaylightSavingTime([DateTime]::Now))"; "started:  $(Get-Date -Format 'yyyy-MM-dd HH:mm K')"; "locale:   $((Get-Culture).Name)"
+```
+
+A bundle is:
+
+| Item | When | Why it earns its place |
+|---|---|---|
+| Commit SHA + branch | always | Makes a later failure a regression against a known point rather than an open question |
+| OS and version | always | |
+| **Timezone, current DST state, locale** | always | Not metadata for completeness. `next_default_name` resets on *local* midnight, gap recovery compares instants across a shutdown, and the widget is sized against non-English string lengths. A regression that only reproduces near a DST boundary or in a non-English locale is diagnosable only if this was recorded |
+| Date and time the run started | always | Pins the run against the DST/midnight boundaries above |
+| Outcome 🟢 / 🟡 / 🔴 | always | |
+| The generated XLSX and JSON from step 11 | always | The product's primary artifact. Keeping it lets a future export be diffed against a known-good one rather than eyeballed |
+| **Archived data directory** | 🟡 and 🔴 | The only copy of the state that produced the result. See the Abort steps — do not relaunch first |
+
+Keep bundles wherever suits; they are deliberately not committed, since they contain real captured work.
+
 ## Concluding the pass
 
 Every run ends in exactly one of three outcomes. Record it — a pass without a recorded conclusion is indistinguishable from a run nobody finished.
