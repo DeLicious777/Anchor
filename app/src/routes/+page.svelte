@@ -300,6 +300,14 @@
     return `${minutes} min`;
   }
 
+  // Wall-clock time in the user's locale. The stored value is UTC; the History
+  // View is read by a person recalling their own day, so it shows local time.
+  const timeOfDay = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+
+  function clockLabel(instant: string | null): string {
+    return instant ? timeOfDay.format(new Date(instant)) : "—";
+  }
+
   // Case-insensitive substring match on the name being typed, capped so the
   // dropdown never grows unbounded — a display concern, not a perf workaround.
   let templateSuggestions = $derived(
@@ -575,7 +583,12 @@
     {:else}
       <table>
         <thead>
-          <tr><th>Name</th><th>Project</th><th>Client</th><th>Duration</th><th>End time</th><th>Capture</th><th>Interruption</th></tr>
+          <!-- "End" is the time; "End source" is how that time was established.
+               These were previously one column headed "End time" that actually
+               rendered the determination — so the times themselves, which
+               `interruption-stack.md` requires the History View to show, were
+               absent while the header claimed otherwise. -->
+          <tr><th>Name</th><th>Project</th><th>Client</th><th>Start</th><th>End</th><th>Duration</th><th>End source</th><th>Capture</th><th>Interruption</th></tr>
         </thead>
         <tbody>
           {#each closedMostRecentFirst as block}
@@ -583,6 +596,8 @@
               <td>{block.name}</td>
               <td>{block.project ?? ""}</td>
               <td>{block.client ?? ""}</td>
+              <td class="clock">{clockLabel(block.start)}</td>
+              <td class="clock">{clockLabel(block.end)}</td>
               <td>{durationLabel(block)}</td>
               <!-- Inferred ends must stay visually distinct from user-determined
                    ones — never silently folded together (interruption-stack.md). -->
@@ -696,6 +711,12 @@
   td.inferred {
     font-style: italic;
     color: #8a6d00;
+  }
+  /* Scanning a column of times is the History View's main reading task, so the
+     digits must line up (visual-redesign.md's monospace-timestamps rule). */
+  td.clock {
+    font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   .error {
     color: #b00020;
