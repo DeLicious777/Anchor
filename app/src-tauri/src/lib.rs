@@ -126,6 +126,8 @@ pub fn run() {
             commands::switch,
             commands::interrupt,
             commands::rename_active,
+            commands::edit_identity,
+            commands::delete_block,
             commands::return_previous,
             commands::return_original,
             commands::complete,

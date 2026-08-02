@@ -226,6 +226,50 @@ pub fn rename_active(
     Ok(view)
 }
 
+/// Corrects the identity of a Time Block that has **already finished** — the
+/// History View's row action, and the historical counterpart to
+/// `rename_active`.
+///
+/// Deliberately a thin adapter: it collects `target` and the new fields and
+/// hands them to the state machine. Every rule — the block must exist, must not
+/// be the active one, and its frame's copy must be updated with it — lives in
+/// `InterruptionStack::apply`, so the UI cannot drift from replay. A failure
+/// surfaces the domain's own error rather than being pre-empted here.
+#[tauri::command]
+pub fn edit_identity(
+    app: AppHandle,
+    state: State<AppState>,
+    target: Uuid,
+    name: String,
+    project: Option<String>,
+    client: Option<String>,
+) -> Result<StackView, String> {
+    let view = apply_transition(&state, |_| TransitionPayload::EditIdentity {
+        target,
+        name,
+        project,
+        client,
+    })?;
+    emit_state_changed(&app, &view);
+    Ok(view)
+}
+
+/// Removes a Time Block from the timeline — the History View's other row
+/// action.
+///
+/// **Confirmation is the frontend's job and is not optional** (accepted design:
+/// Delete is confirmed and MVP has no undo). It is a presentation concern, so
+/// it lives there; what lives here is the guarantee that reaching this function
+/// writes exactly one transition. The domain still rejects a delete that would
+/// orphan an open interruption frame, so a UI that skipped its confirmation
+/// could not corrupt anything — it would only be rude.
+#[tauri::command]
+pub fn delete_block(app: AppHandle, state: State<AppState>, target: Uuid) -> Result<StackView, String> {
+    let view = apply_transition(&state, |_| TransitionPayload::Delete { target })?;
+    emit_state_changed(&app, &view);
+    Ok(view)
+}
+
 #[tauri::command]
 pub fn return_previous(app: AppHandle, state: State<AppState>) -> Result<StackView, String> {
     let view = apply_transition(&state, |_| TransitionPayload::ReturnPrevious)?;
@@ -396,6 +440,138 @@ pub fn update_hotkey_bindings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn log_lines(path: &std::path::Path) -> usize {
+        std::fs::read_to_string(path).map(|s| s.lines().count()).unwrap_or(0)
+    }
+
+    /// **The layering invariant: a History View command is a pure adapter over
+    /// the append-only log.** Every successful one appends exactly one
+    /// transition — no extra mutations, no bypassing the transition system, no
+    /// batching. If a future refactor lets UI concerns reach around `apply()`,
+    /// this fails immediately rather than at the next replay.
+    ///
+    /// The failed cases matter as much as the successful ones: a rejected
+    /// command must write *nothing*, or the log accumulates transitions that
+    /// never happened.
+    #[test]
+    fn every_history_view_command_appends_exactly_one_transition_and_a_rejected_one_appends_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let (state, _) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
+
+        apply_transition(&state, |_| TransitionPayload::Start {
+            name: "work".into(),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+        let view = apply_transition(&state, |_| TransitionPayload::Complete).unwrap();
+        let target = view.closed[0].block.id;
+
+        let before = log_lines(&path);
+        apply_transition(&state, |_| TransitionPayload::EditIdentity {
+            target,
+            name: "corrected".into(),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+        assert_eq!(log_lines(&path), before + 1, "EditIdentity appends exactly one line");
+
+        let before = log_lines(&path);
+        let unknown = Uuid::nil();
+        assert!(
+            apply_transition(&state, |_| TransitionPayload::Delete { target: unknown }).is_err(),
+            "the domain rejects an unknown target"
+        );
+        assert_eq!(log_lines(&path), before, "a rejected command must append nothing");
+
+        let before = log_lines(&path);
+        apply_transition(&state, |_| TransitionPayload::Delete { target }).unwrap();
+        assert_eq!(log_lines(&path), before + 1, "Delete appends exactly one line");
+    }
+
+    /// The domain owns validation, not the UI. A command against a block that
+    /// an unresolved interruption still refers to must surface the domain's own
+    /// error — the frontend does not pre-empt it, so the two can never disagree.
+    #[test]
+    fn a_command_surfaces_the_domain_error_rather_than_the_ui_preventing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let (state, _) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
+
+        apply_transition(&state, |_| TransitionPayload::Start { name: "root".into(), project: None, client: None }).unwrap();
+        let view = apply_transition(&state, |_| TransitionPayload::Interrupt {
+            name: "phone".into(),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+        let paused = view.stack[0].paused_time_block_id;
+
+        let before = log_lines(&path);
+        let err = apply_transition(&state, |_| TransitionPayload::Delete { target: paused }).unwrap_err();
+        assert!(err.contains("unresolved interruption"), "got: {err}");
+        assert_eq!(log_lines(&path), before, "and nothing was written");
+
+        // Editing that same block is permitted — identity only, per the tier rule.
+        apply_transition(&state, |_| TransitionPayload::EditIdentity {
+            target: paused,
+            name: "renamed".into(),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+    }
+
+    /// Delete's effect must reach the artifact that gets billed, and survive a
+    /// restart — the two places a "removed from the timeline" claim can quietly
+    /// fail to hold.
+    #[test]
+    fn a_deleted_block_leaves_the_history_view_the_export_and_the_replayed_state() {
+        use crate::export::{blocks_in_range, group};
+        use chrono::{Duration, Utc};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+
+        let (kept, doomed) = {
+            let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+            apply_transition(&state, |_| TransitionPayload::Start { name: "kept".into(), project: None, client: None }).unwrap();
+            apply_transition(&state, |_| TransitionPayload::Switch { name: "mistake".into(), project: None, client: None }).unwrap();
+            let view = apply_transition(&state, |_| TransitionPayload::Complete).unwrap();
+            let kept = view.closed.iter().find(|b| b.block.name == "kept").unwrap().block.id;
+            let doomed = view.closed.iter().find(|b| b.block.name == "mistake").unwrap().block.id;
+
+            let view = apply_transition(&state, |_| TransitionPayload::Delete { target: doomed }).unwrap();
+            assert!(
+                !view.closed.iter().any(|b| b.block.id == doomed),
+                "gone from the view the History View renders"
+            );
+
+            let inner = state.inner.lock().unwrap();
+            let rows = group(&blocks_in_range(
+                &inner.stack.closed,
+                inner.stack.active.as_ref(),
+                Utc::now() - Duration::days(1),
+                Utc::now() + Duration::days(1),
+                Utc::now(),
+            ));
+            assert!(!rows.iter().any(|r| r.name == "mistake"), "gone from the export");
+            assert!(rows.iter().any(|r| r.name == "kept"), "and the neighbour is untouched");
+            (kept, doomed)
+        };
+
+        let (restarted, _) = AppState::init(&path, &snapshot_path).unwrap();
+        let inner = restarted.inner.lock().unwrap();
+        assert!(inner.stack.closed.iter().any(|b| b.id == kept), "the survivor keeps its identity");
+        assert!(
+            !inner.stack.closed.iter().any(|b| b.id == doomed),
+            "replay reproduces the deletion — live and replayed state agree"
+        );
+    }
 
     /// `switch` used to branch internally and emit `Start` when nothing was
     /// active — one command, two transitions, which ADR 0005 rejected. These

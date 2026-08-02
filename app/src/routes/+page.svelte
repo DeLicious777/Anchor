@@ -9,6 +9,8 @@
     returnOriginal,
     completeTask,
     renameActive,
+    editIdentity,
+    deleteBlock,
     getState,
     onStateChanged,
     listTemplates,
@@ -24,7 +26,7 @@
     getHotkeyBindings,
     updateHotkeyBindings,
   } from "$lib/api";
-  import type { StackView, TimeBlock, TaskTemplate, ExportSettings, HotkeyBindings } from "$lib/types";
+  import type { StackView, TimeBlock, ClosedBlock, TaskTemplate, ExportSettings, HotkeyBindings } from "$lib/types";
   import { formatElapsed } from "$lib/time";
 
   let name = $state("");
@@ -33,6 +35,58 @@
   let error = $state<string | null>(null);
 
   let view = $state<StackView>({ active: null, stack: [], closed: [] });
+
+  // --- History View row actions (timeline-reconstruction.md) ----------------
+  // Edit Identity and Delete are row-level, so they live here rather than on
+  // the Timeline Editor (#14), which owns direct manipulation: Add/Move/Resize.
+  //
+  // Both are thin: this collects input and calls the command. Every rule — the
+  // block must exist, must not be the active one, and must not have an
+  // unresolved interruption pointing at it — is enforced by the domain, and its
+  // error is surfaced verbatim. Duplicating those checks here would let the UI
+  // and replay drift apart.
+  let editingId = $state<string | null>(null);
+  let editName = $state("");
+  let editProject = $state("");
+  let editClient = $state("");
+  // Deleting a Time Block destroys a billing record and MVP has no undo, so it
+  // is confirmed — the persona rule reserves confirmations for exactly this.
+  let pendingDeleteId = $state<string | null>(null);
+
+  function beginEdit(block: ClosedBlock) {
+    editingId = block.id;
+    editName = block.name;
+    editProject = block.project ?? "";
+    editClient = block.client ?? "";
+    error = null;
+  }
+
+  function cancelEdit() {
+    editingId = null;
+  }
+
+  async function saveEdit() {
+    if (!editingId) return;
+    try {
+      view = await editIdentity(editingId, editName, nullable(editProject), nullable(editClient));
+      editingId = null;
+      error = null;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function confirmDelete() {
+    if (!pendingDeleteId) return;
+    try {
+      view = await deleteBlock(pendingDeleteId);
+      pendingDeleteId = null;
+      error = null;
+    } catch (e) {
+      error = String(e);
+      pendingDeleteId = null;
+    }
+  }
 
   let templates = $state<TaskTemplate[]>([]);
   let templateFormName = $state("");
@@ -588,7 +642,7 @@
                rendered the determination — so the times themselves, which
                `interruption-stack.md` requires the History View to show, were
                absent while the header claimed otherwise. -->
-          <tr><th>Name</th><th>Project</th><th>Client</th><th>Start</th><th>End</th><th>Duration</th><th>End source</th><th>Capture</th><th>Interruption</th></tr>
+          <tr><th>Name</th><th>Project</th><th>Client</th><th>Start</th><th>End</th><th>Duration</th><th>End source</th><th>Capture</th><th>Interruption</th><th></th></tr>
         </thead>
         <tbody>
           {#each closedMostRecentFirst as block}
@@ -608,7 +662,34 @@
               <!-- The backend's canonical projection, never `interruption_outcome`
                    directly: absent is ambiguous, and no view may reinterpret it. -->
               <td>{block.derived_interruption_status}</td>
+              <td class="actions">
+                {#if pendingDeleteId === block.id}
+                  <!-- Delete destroys a billing record and there is no undo, so
+                       it is confirmed. Cancelling performs no transition at all. -->
+                  <span class="confirm">Delete this block?</span>
+                  <button type="button" class="danger" onclick={confirmDelete}>Delete</button>
+                  <button type="button" onclick={() => (pendingDeleteId = null)}>Cancel</button>
+                {:else}
+                  <button type="button" onclick={() => beginEdit(block)}>Edit</button>
+                  <button type="button" onclick={() => (pendingDeleteId = block.id)}>Delete</button>
+                {/if}
+              </td>
             </tr>
+            {#if editingId === block.id}
+              <tr class="edit-row">
+                <td colspan="10">
+                  <!-- Same three fields as Rename, on a block that has already
+                       finished. No client-side validation: the domain rejects an
+                       edit to the active block or an unknown id, and its error is
+                       surfaced above rather than pre-empted here. -->
+                  <label>Name <input bind:value={editName} /></label>
+                  <label>Project <input bind:value={editProject} /></label>
+                  <label>Client <input bind:value={editClient} /></label>
+                  <button type="button" onclick={saveEdit}>Save</button>
+                  <button type="button" onclick={cancelEdit}>Cancel</button>
+                </td>
+              </tr>
+            {/if}
           {/each}
         </tbody>
       </table>
@@ -714,6 +795,20 @@
   }
   /* Scanning a column of times is the History View's main reading task, so the
      digits must line up (visual-redesign.md's monospace-timestamps rule). */
+  td.actions {
+    white-space: nowrap;
+  }
+  td.actions .confirm {
+    margin-right: 0.5rem;
+    font-weight: 600;
+  }
+  button.danger {
+    color: #b00020;
+    font-weight: 600;
+  }
+  tr.edit-row label {
+    margin-right: 0.75rem;
+  }
   td.clock {
     font-variant-numeric: tabular-nums;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

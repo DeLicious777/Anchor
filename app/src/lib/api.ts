@@ -62,6 +62,33 @@ export function renameActive(name: string, project: string | null, client: strin
   return invoke("rename_active", { name, project, client });
 }
 
+/**
+ * Corrects the identity of a Time Block that has already finished — the
+ * History View's row action, and the historical counterpart to
+ * `renameActive`. Kept a separate call for the same reason it is a separate
+ * transition: the two produce identical state but answer different questions
+ * about how it came to be.
+ */
+export function editIdentity(
+  target: string,
+  name: string,
+  project: string | null,
+  client: string | null,
+): Promise<StackView> {
+  return invoke("edit_identity", { target, name, project, client });
+}
+
+/**
+ * Removes a Time Block from the timeline. **Callers must confirm first** —
+ * there is no undo (see `timeline-reconstruction.md`). The domain still
+ * rejects a delete that would orphan an open interruption frame, so skipping
+ * the confirmation cannot corrupt anything; it would only destroy a billing
+ * record without asking.
+ */
+export function deleteBlock(target: string): Promise<StackView> {
+  return invoke("delete_block", { target });
+}
+
 export function getState(): Promise<StackView> {
   return invoke("get_state");
 }
