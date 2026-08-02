@@ -226,6 +226,66 @@ pub fn rename_active(
     Ok(view)
 }
 
+/// Creates a Time Block for work that happened but was never captured.
+///
+/// The first command to carry author-chosen boundaries rather than deriving
+/// them from when it was invoked. Thin like the rest: no clamping, no snapping,
+/// no time arithmetic. `start` and `end` are passed through exactly as given,
+/// and the domain decides whether that span is legal — it rejects overlaps, a
+/// non-positive duration, and any end in the future, against the transition's
+/// own timestamp rather than a clock read here.
+#[tauri::command]
+pub fn add_block(
+    app: AppHandle,
+    state: State<AppState>,
+    name: String,
+    project: Option<String>,
+    client: Option<String>,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<StackView, String> {
+    let view = apply_transition(&state, |_| TransitionPayload::Add { name, project, client, start, end })?;
+    emit_state_changed(&app, &view);
+    Ok(view)
+}
+
+/// Translates a block to a new start, preserving its duration exactly.
+///
+/// Takes only `start` — the same shape as the transition, and for the same
+/// reason: the end is the block's own duration applied at the new position, so
+/// neither this command nor its caller can express a duration change. A caller
+/// that wants one is asking for `resize_block`.
+#[tauri::command]
+pub fn move_block(
+    app: AppHandle,
+    state: State<AppState>,
+    target: Uuid,
+    start: DateTime<Utc>,
+) -> Result<StackView, String> {
+    let view = apply_transition(&state, |_| TransitionPayload::Move { target, start })?;
+    emit_state_changed(&app, &view);
+    Ok(view)
+}
+
+/// Reshapes a block's span — the mechanism risks R9 and R4 have been promised
+/// since 2026-07-23 and never had.
+///
+/// Passes both boundaries through untouched. Whether the end actually changed,
+/// and therefore whether `EndDetermination` becomes `UserDetermined`, is the
+/// domain's determination and not this layer's to anticipate.
+#[tauri::command]
+pub fn resize_block(
+    app: AppHandle,
+    state: State<AppState>,
+    target: Uuid,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<StackView, String> {
+    let view = apply_transition(&state, |_| TransitionPayload::Resize { target, start, end })?;
+    emit_state_changed(&app, &view);
+    Ok(view)
+}
+
 /// Corrects the identity of a Time Block that has **already finished** — the
 /// History View's row action, and the historical counterpart to
 /// `rename_active`.
@@ -455,41 +515,169 @@ mod tests {
     /// command must write *nothing*, or the log accumulates transitions that
     /// never happened.
     #[test]
-    fn every_history_view_command_appends_exactly_one_transition_and_a_rejected_one_appends_none() {
+    fn every_reconstruction_command_appends_exactly_one_transition_and_a_rejected_one_appends_none() {
+        use chrono::Duration;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
         let (state, _) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
 
-        apply_transition(&state, |_| TransitionPayload::Start {
-            name: "work".into(),
-            project: None,
-            client: None,
-        })
-        .unwrap();
+        let now = Utc::now();
+        let ago = |mins: i64| now - Duration::minutes(mins);
+
+        // A finished block to act on, plus a free span well before it.
+        apply_transition(&state, |_| TransitionPayload::Start { name: "work".into(), project: None, client: None })
+            .unwrap();
         let view = apply_transition(&state, |_| TransitionPayload::Complete).unwrap();
         let target = view.closed[0].block.id;
 
-        let before = log_lines(&path);
-        apply_transition(&state, |_| TransitionPayload::EditIdentity {
-            target,
-            name: "corrected".into(),
-            project: None,
-            client: None,
-        })
-        .unwrap();
-        assert_eq!(log_lines(&path), before + 1, "EditIdentity appends exactly one line");
+        // Each of the five, checked one at a time so a failure names the culprit.
+        let expect_one = |label: &str, payload: TransitionPayload| {
+            let before = log_lines(&path);
+            let result = apply_transition(&state, |_| payload);
+            assert!(result.is_ok(), "{label} should succeed: {:?}", result.err());
+            assert_eq!(log_lines(&path), before + 1, "{label} must append exactly one line");
+        };
 
-        let before = log_lines(&path);
-        let unknown = Uuid::nil();
-        assert!(
-            apply_transition(&state, |_| TransitionPayload::Delete { target: unknown }).is_err(),
-            "the domain rejects an unknown target"
+        expect_one(
+            "Add",
+            TransitionPayload::Add {
+                name: "forgotten".into(),
+                project: None,
+                client: None,
+                start: ago(120),
+                end: ago(90),
+            },
         );
-        assert_eq!(log_lines(&path), before, "a rejected command must append nothing");
+        let added = {
+            let inner = state.inner.lock().unwrap();
+            inner.stack.closed.iter().find(|b| b.name == "forgotten").unwrap().id
+        };
+        expect_one("Move", TransitionPayload::Move { target: added, start: ago(240) });
+        expect_one("Resize", TransitionPayload::Resize { target: added, start: ago(240), end: ago(200) });
+        expect_one(
+            "EditIdentity",
+            TransitionPayload::EditIdentity { target, name: "corrected".into(), project: None, client: None },
+        );
+        expect_one("Delete", TransitionPayload::Delete { target });
 
-        let before = log_lines(&path);
-        apply_transition(&state, |_| TransitionPayload::Delete { target }).unwrap();
-        assert_eq!(log_lines(&path), before + 1, "Delete appends exactly one line");
+        // And the rejection half, which matters as much: a command the domain
+        // refuses must leave the log untouched, or it accumulates transitions
+        // for things that never happened.
+        let unknown = Uuid::nil();
+        let rejections: Vec<(&str, TransitionPayload)> = vec![
+            ("Add overlapping", TransitionPayload::Add {
+                name: "clash".into(),
+                project: None,
+                client: None,
+                start: ago(230),
+                end: ago(210),
+            }),
+            ("Add ending in the future", TransitionPayload::Add {
+                name: "later".into(),
+                project: None,
+                client: None,
+                start: ago(10),
+                end: now + Duration::minutes(10),
+            }),
+            ("Move unknown", TransitionPayload::Move { target: unknown, start: ago(600) }),
+            ("Resize unknown", TransitionPayload::Resize { target: unknown, start: ago(600), end: ago(500) }),
+            ("EditIdentity unknown", TransitionPayload::EditIdentity {
+                target: unknown,
+                name: "x".into(),
+                project: None,
+                client: None,
+            }),
+            ("Delete unknown", TransitionPayload::Delete { target: unknown }),
+        ];
+        for (label, payload) in rejections {
+            let before = log_lines(&path);
+            assert!(apply_transition(&state, |_| payload).is_err(), "{label} should be rejected");
+            assert_eq!(log_lines(&path), before, "{label} must append nothing");
+        }
+    }
+
+    /// One per command: invoke → append → replay → final state. Deliberately
+    /// not a re-run of the domain tests — what this checks is that the command
+    /// layer writes a payload replay can reconstruct the same state from, with
+    /// nothing held only in memory.
+    #[test]
+    fn each_reconstruction_command_survives_a_replay_with_identical_state() {
+        use chrono::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+        let now = Utc::now();
+        let ago = |mins: i64| now - Duration::minutes(mins);
+
+        let (added_id, kept_id) = {
+            let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+
+            apply_transition(&state, |_| TransitionPayload::Add {
+                name: "reconstructed".into(),
+                project: None,
+                client: None,
+                start: ago(300),
+                end: ago(240),
+            })
+            .unwrap();
+            apply_transition(&state, |_| TransitionPayload::Add {
+                name: "kept".into(),
+                project: None,
+                client: None,
+                start: ago(100),
+                end: ago(60),
+            })
+            .unwrap();
+
+            let (added_id, kept_id) = {
+                let inner = state.inner.lock().unwrap();
+                let f = |n: &str| inner.stack.closed.iter().find(|b| b.name == n).unwrap().id;
+                (f("reconstructed"), f("kept"))
+            };
+
+            apply_transition(&state, |_| TransitionPayload::Move { target: added_id, start: ago(400) }).unwrap();
+            apply_transition(&state, |_| TransitionPayload::Resize {
+                target: added_id,
+                start: ago(400),
+                end: ago(330),
+            })
+            .unwrap();
+            apply_transition(&state, |_| TransitionPayload::EditIdentity {
+                target: added_id,
+                name: "renamed".into(),
+                project: Some("Acme".into()),
+                client: None,
+            })
+            .unwrap();
+
+            let inner = state.inner.lock().unwrap();
+            let live = inner.stack.closed.iter().find(|b| b.id == added_id).unwrap();
+            assert_eq!(live.name, "renamed");
+            assert_eq!(live.start, ago(400));
+            assert_eq!(live.end, Some(ago(330)));
+            assert_eq!(live.capture_origin, crate::model::CaptureOrigin::ManualEntryAdjusted);
+            (added_id, kept_id)
+        };
+
+        let (restarted, _) = AppState::init(&path, &snapshot_path).unwrap();
+        let inner = restarted.inner.lock().unwrap();
+        let replayed = inner.stack.closed.iter().find(|b| b.id == added_id).unwrap();
+
+        assert_eq!(replayed.name, "renamed", "the identity edit replayed");
+        assert_eq!(replayed.start, ago(400), "the move replayed");
+        assert_eq!(replayed.end, Some(ago(330)), "the resize replayed");
+        assert_eq!(
+            replayed.capture_origin,
+            crate::model::CaptureOrigin::ManualEntryAdjusted,
+            "origin preserved, adjusted set — live and replayed agree"
+        );
+        assert_eq!(
+            replayed.end_determination,
+            Some(crate::model::EndDetermination::UserDetermined)
+        );
+        assert!(inner.stack.closed.iter().any(|b| b.id == kept_id), "the untouched neighbour survived");
     }
 
     /// The domain owns validation, not the UI. A command against a block that

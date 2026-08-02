@@ -63,6 +63,41 @@ export function renameActive(name: string, project: string | null, client: strin
 }
 
 /**
+ * Creates a Time Block for work that happened but was never captured.
+ *
+ * `start` and `end` are ISO-8601 instants and are sent through untouched. The
+ * caller does **not** clamp, snap, or adjust them — the domain rejects an
+ * overlapping span, a non-positive duration, or an end in the future, and its
+ * error is what surfaces. The Timeline Editor (#14) may clamp a *gesture* for
+ * usability, but what it sends is still validated here.
+ */
+export function addBlock(
+  name: string,
+  project: string | null,
+  client: string | null,
+  start: string,
+  end: string,
+): Promise<StackView> {
+  return invoke("add_block", { name, project, client, start, end });
+}
+
+/**
+ * Translates a block to a new start, preserving its duration exactly.
+ *
+ * Takes only `start` by design: the end is the block's own duration applied at
+ * the new position, so a duration change is not expressible here. That is
+ * `resizeBlock`.
+ */
+export function moveBlock(target: string, start: string): Promise<StackView> {
+  return invoke("move_block", { target, start });
+}
+
+/** Reshapes a block's span. Both boundaries are sent as given. */
+export function resizeBlock(target: string, start: string, end: string): Promise<StackView> {
+  return invoke("resize_block", { target, start, end });
+}
+
+/**
  * Corrects the identity of a Time Block that has already finished — the
  * History View's row action, and the historical counterpart to
  * `renameActive`. Kept a separate call for the same reason it is a separate
