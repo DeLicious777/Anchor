@@ -933,7 +933,7 @@ mod tests {
     /// regardless of why (crash or just closing the app) — and must come back
     /// as `recovered-gap`, not silently resumed as if nothing happened.
     #[test]
-    fn restart_with_something_left_active_recovers_it_as_gap_not_resumed() {
+    fn restart_within_the_continuity_threshold_leaves_the_active_block_running() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
 
@@ -948,12 +948,21 @@ mod tests {
             // Dropped here with "A" still active — no Complete/Switch/Return.
         }
 
+        // Rewritten for ADR 0007. This restart is immediate, so the outage is
+        // under the continuity threshold and "A" simply carries on — the case
+        // that used to close it and, with no heartbeat yet landed, produce a
+        // zero-duration block. The sleep/wake path always behaved this way; now
+        // both do. A gap long enough to matter is covered by
+        // `state::tests::a_gap_inside_the_resume_limit_closes_and_restarts_the_task`.
         let (restarted, report) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
-        assert!(report.startup_gap_recovered);
+        assert!(!report.startup_gap_recovered, "a sub-threshold restart is not a gap");
         let inner = restarted.inner.lock().unwrap();
-        assert!(inner.stack.active.is_none());
-        let a = inner.stack.closed.iter().find(|b| b.name == "A").unwrap();
-        assert_eq!(a.end_determination, Some(crate::model::EndDetermination::SystemInferred));
+        assert_eq!(
+            inner.stack.active.as_ref().map(|b| b.name.as_str()),
+            Some("A"),
+            "the block was never closed, so nothing was inferred about its end"
+        );
+        assert!(inner.stack.closed.is_empty());
     }
 
     #[test]

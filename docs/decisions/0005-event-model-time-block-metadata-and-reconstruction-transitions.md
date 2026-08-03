@@ -146,6 +146,12 @@ The metadata is **pure derived state**, recomputed by `InterruptionStack::apply`
 
 ## Resolution of open item 9 (2026-07-29): wake stops auto-starting
 
+> **SUPERSEDED by [ADR 0007](0007-auto-resume-after-a-short-gap.md) (2026-08-03).** A gap shorter than one hour now closes the block *and* restarts the same work; only longer gaps resolve as decided below. The reasoning here was not found to be wrong — the author re-weighed the trade it names, and the "an accurate record over a convenient one" cost was accepted within a bound rather than rejected.
+>
+> **One claim below turned out to be incomplete**, found while writing ADR 0007. It says handling wake and crash differently *"was the anomaly, and this removes it."* It removed the auto-start half; `power.rs` kept a 90-second grace window that `AppState::init` never had, so a brief sleep-wake stayed a non-event while a brief crash-relaunch closed the block and — with no heartbeat yet landed — produced a zero-duration one. Both paths now share `crate::gap`.
+>
+> Text retained unedited below. ADRs are append-only.
+
 **Decision: on sleep/wake, `power.rs` emits `RecoverGap` and nothing else.** The active entry is closed with an inferred end; no new Time Block is started. The user resumes deliberately, via the capture action.
 
 **The deciding argument is consistency, which none of the three original options named.** `state::AppState::init` — crash recovery — already does exactly this: `RecoverGap`, no auto-resume. Wake and crash are the same class of event: *Anchor lost continuity and cannot know what happened in the gap.* Handling them differently was the anomaly, and this removes it rather than adding a rule.

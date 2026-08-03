@@ -48,7 +48,13 @@ Watch: while interrupted, the paused block shows `pending` — *not* `never-inte
 **4. Leave a task running and kill the app ungracefully** (Task Manager, not the close button). Relaunch.
 Seam: replay → gap recovery → **A15**.
 Watch: the leftover block is closed with `End source` = **inferred**, and its end is roughly when you killed it — **not** the moment you relaunched. An end equal to relaunch time means the inference bound was lost, which silently bills every minute the app was closed (**R4** at maximum severity).
-Watch: nothing auto-resumes. Recovery deliberately does not restart the task.
+Watch: **the task restarts by itself**, as a new block starting at relaunch — the gap must remain a visible hole, never counted as work ([ADR 0007](decisions/0007-auto-resume-after-a-short-gap.md)).
+
+**4b. Repeat, but wait more than an hour before relaunching** (or leave it overnight).
+Watch: the entry is closed exactly as above and **nothing restarts** — beyond an hour Anchor stops guessing that you came back to the same task.
+
+**4c. Repeat, relaunching within a few seconds.**
+Watch: **no gap event at all** — the task is simply still running, with no closed block and no inferred end. A zero-duration block here means the continuity threshold is not being applied on this path, which is the defect ADR 0007 fixed.
 
 ### Reconstruction
 

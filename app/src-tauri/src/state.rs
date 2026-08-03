@@ -5,7 +5,6 @@
 use crate::log::reader::replay;
 use crate::log::snapshot::{compact, CompactionTrigger, Snapshot};
 use crate::log::writer::LogWriter;
-use crate::model::TransitionPayload;
 use crate::stack::InterruptionStack;
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
@@ -75,11 +74,13 @@ pub fn compact_on_shutdown(state: &AppState) {
 pub struct InitReport {
     pub torn_line_discarded: bool,
     /// True if replay left an active entry (the process stopped running — for
-    /// any reason — while something was active) and it was closed with an
-    /// inferred end (`EndDetermination::SystemInferred`). Deliberately does NOT
-    /// auto-resume — and since 2026-07-29 the live sleep/wake path does not
-    /// either (ADR 0005 open item 9): wake and crash are the same class of
-    /// event, so they resolve identically.
+    /// any reason — while something was active) and the gap was long enough to
+    /// close it with an inferred end (`EndDetermination::SystemInferred`).
+    ///
+    /// False when the outage was under the continuity threshold and the block
+    /// simply carried on. Whether the task was then auto-resumed is decided by
+    /// `crate::gap` per ADR 0007 — startup and sleep/wake share one rule, so
+    /// they resolve identically.
     pub startup_gap_recovered: bool,
 }
 
@@ -116,6 +117,11 @@ impl AppState {
         let last_activity_on_disk = result.last_timestamp.or(snapshot_activity);
         let mut last_activity_at = last_activity_on_disk.unwrap_or_else(Utc::now);
 
+        // **The shared gap rule** (ADR 0007). Startup used to close any leftover
+        // active block unconditionally while the wake path ignored gaps under 90
+        // seconds — so a brief crash-relaunch produced a zero-duration block
+        // while a brief sleep-wake produced nothing. Both paths now ask
+        // `crate::gap`, so they cannot disagree again.
         if stack.active.is_some() {
             // Guaranteed Some: an active entry reached this point either from a
             // parsed line (which sets `last_timestamp`) or from a snapshot
@@ -123,13 +129,18 @@ impl AppState {
             // real bug loudly rather than silently guessing a fallback — and
             // guessing would be the dangerous option, since `Utc::now()` would
             // infer an end covering the entire time the app was closed.
-            let inferred_end = last_activity_on_disk
+            let last_alive = last_activity_on_disk
                 .expect("active entry survived replay but neither the log nor the snapshot supplied a last-activity timestamp");
 
-            let record = writer.append(TransitionPayload::RecoverGap { inferred_end })?;
-            stack.apply(&record.payload, record.timestamp, record.seq)?;
-            last_activity_at = record.timestamp;
-            startup_gap_recovered = true;
+            let resolution = crate::gap::resolve(stack.active.as_ref(), last_alive, Utc::now());
+            for payload in resolution.transitions() {
+                let record = writer.append(payload)?;
+                stack.apply(&record.payload, record.timestamp, record.seq)?;
+                last_activity_at = record.timestamp;
+            }
+            // Reported only when a block was actually closed, not when the gap
+            // was short enough to ignore.
+            startup_gap_recovered = !matches!(resolution, crate::gap::GapResolution::Continue);
         }
 
         let state = AppState {
@@ -163,6 +174,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::TransitionPayload;
     use crate::log::snapshot::{compact, Snapshot};
     use crate::model::EndDetermination;
     use chrono::Duration;
@@ -184,12 +196,16 @@ mod tests {
         let path = dir.path().join("log.jsonl");
         let snapshot_path = dir.path().join("snapshot.json");
 
+        // Backdated well past the continuity threshold so this is a real gap
+        // (ADR 0007). The subject of this test is unchanged — *where* the
+        // inferred end comes from after the log is truncated — and a gap short
+        // enough to ignore would simply not exercise it.
         let last_write = {
             let mut writer = LogWriter::open(&path, 0).unwrap();
-            let record = writer
+            writer
                 .append(TransitionPayload::Start { name: "long task".into(), project: None, client: None })
                 .unwrap();
-            record.timestamp
+            Utc::now() - Duration::hours(3)
         };
 
         // Compaction, mid-session, with the block still running.
@@ -436,13 +452,17 @@ mod tests {
         drop(state);
 
         let (restarted, report) = AppState::init(&path, &snapshot_path).unwrap();
-        assert!(report.startup_gap_recovered, "t499 was still active when compaction ran");
+        // The 500 transitions are written back to back, so the restart lands
+        // inside the continuity threshold and t499 simply keeps running
+        // (ADR 0007). This test's subject is compaction, not gap recovery.
+        assert!(!report.startup_gap_recovered, "a sub-threshold restart is not a gap");
         let inner = restarted.inner.lock().unwrap();
         assert_eq!(
             inner.stack.closed.len() as u32,
-            CompactionTrigger::THRESHOLD,
-            "every block survives the snapshot round-trip"
+            CompactionTrigger::THRESHOLD - 1,
+            "every closed block survives the snapshot round-trip; t499 is still active"
         );
+        assert!(inner.stack.active.is_some(), "and it carried on across the restart");
     }
 
     /// Heartbeats must never drive compaction. ADR 0004 is explicit: a
@@ -533,8 +553,14 @@ mod tests {
         );
     }
 
+    /// **Rewritten for ADR 0007, not weakened.** This previously asserted that
+    /// a leftover active entry is closed and *nothing* resumes. That was ADR
+    /// 0005 open item 9, which ADR 0007 supersedes: within the resume limit the
+    /// task now restarts. What has not changed, and is still asserted, is that
+    /// the *closed* block gets an inferred end and that a paused frame is left
+    /// untouched by recovery.
     #[test]
-    fn leftover_active_entry_is_closed_as_recovered_gap_with_no_auto_resume() {
+    fn leftover_active_entry_is_closed_as_recovered_gap_and_resumed_within_the_limit() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
         {
@@ -551,15 +577,19 @@ mod tests {
 
         let (state, report) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
         assert!(!report.torn_line_discarded);
-        assert!(report.startup_gap_recovered);
+        // The writes above are immediate, so the gap is under the continuity
+        // threshold and the block simply carries on — the case that used to
+        // produce a zero-duration block on this path but not on the wake path.
+        assert!(!report.startup_gap_recovered, "a sub-threshold outage is not a gap");
 
         let inner = state.inner.lock().unwrap();
-        assert!(inner.stack.active.is_none(), "startup recovery must not auto-resume");
-        let b = inner.stack.closed.iter().find(|b| b.name == "B").unwrap();
-        assert_eq!(b.end_determination, Some(EndDetermination::SystemInferred));
-        assert!(b.end.is_some());
-        // "A" (paused on the stack) is untouched by startup recovery — it's not
-        // the active entry, so it stays pending until explicitly resumed.
+        assert_eq!(
+            inner.stack.active.as_ref().map(|b| b.name.as_str()),
+            Some("B"),
+            "the block was never interrupted, so it is still the active one"
+        );
+        // "A" (paused on the stack) is untouched by recovery either way — it is
+        // not the active entry, so it stays pending until explicitly resumed.
         let a = inner.stack.closed.iter().find(|b| b.name == "A").unwrap();
         assert_eq!(a.end_determination, Some(EndDetermination::UserDetermined), "A was closed by the Interrupt, not by the gap");
         assert_eq!(a.interruption_outcome, None, "never resolved — its frame was still open at the crash");

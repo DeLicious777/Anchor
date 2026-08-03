@@ -21,38 +21,16 @@
 //! across both paths, and owned by Pause's design work (issue #16).
 
 use crate::commands::{apply_transition, emit_state_changed};
-use crate::model::{TimeBlock, TransitionPayload};
 use crate::state::AppState;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::Utc;
 use std::sync::OnceLock;
 use tauri::{AppHandle, Manager};
 
-/// Safely past the 60s heartbeat interval, to avoid false positives from
-/// ordinary scheduling jitter.
-pub const RESUME_GAP_THRESHOLD_SECS: i64 = 90;
-
-/// Pure decision logic, independent of the actual `WM_POWERBROADCAST` wiring so
-/// it's unit-testable without a real sleep/wake cycle. Given the currently
-/// active entry (if any) and how long ago the last durable write was, decide
-/// whether to resolve a gap — and if so, the single transition to apply: close
-/// the active entry as `recovered-gap`. The threshold is inclusive (>=): a gap
-/// of exactly the threshold counts.
-///
-/// Returns ONE payload, not a pair. It used to return `(RecoverGap, Start)`;
-/// the return type was collapsed deliberately when ADR 0005 open item 9 removed
-/// the auto-resume, so the second transition cannot be reintroduced by accident
-/// — there is no longer anywhere to put it.
-pub fn resolve_resume_gap(
-    active: Option<&TimeBlock>,
-    last_activity_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> Option<TransitionPayload> {
-    active?;
-    if now - last_activity_at < ChronoDuration::seconds(RESUME_GAP_THRESHOLD_SECS) {
-        return None;
-    }
-    Some(TransitionPayload::RecoverGap { inferred_end: last_activity_at })
-}
+/// Re-exported for the tests and callers that still name it. The rule itself
+/// now lives in `crate::gap`, shared with `state::AppState::init` — see
+/// [ADR 0007](../../../docs/decisions/0007-auto-resume-after-a-short-gap.md).
+/// Before that, this path and the startup path disagreed about short gaps.
+pub use crate::gap::CONTINUITY_THRESHOLD_SECS as RESUME_GAP_THRESHOLD_SECS;
 
 /// The AppHandle reachable from the raw WndProc — there is only ever one such
 /// window for the app's lifetime, so a global slot is the simplest correct
@@ -65,22 +43,26 @@ fn handle_resume(app: &AppHandle) {
         return;
     };
     let now = Utc::now();
-    let decision = {
+    let resolution = {
         let inner = state.inner.lock().unwrap();
-        resolve_resume_gap(inner.stack.active.as_ref(), inner.last_activity_at, now)
-    };
-    let Some(recover_payload) = decision else {
-        return;
+        crate::gap::resolve(inner.stack.active.as_ref(), inner.last_activity_at, now)
     };
 
-    // One transition, then done. Nothing is started: the user resumes
-    // deliberately (ADR 0005 open item 9). Per
-    // `docs/product/features/interruption-stack.md`, no prompt interrupts them
-    // at wake either — the closed entry is surfaced in the dashboard whenever
-    // they next open it.
-    match apply_transition(&state, |_| recover_payload.clone()) {
-        Ok(view) => emit_state_changed(app, &view),
-        Err(e) => eprintln!("resume-gap recovery failed: {e}"),
+    // Whatever the shared rule says, applied in order. A short gap yields
+    // RecoverGap + Start (ADR 0007); a long one yields RecoverGap alone; a very
+    // short one yields nothing at all. No prompt interrupts the user at wake
+    // either way — `docs/product/features/interruption-stack.md`.
+    for payload in resolution.transitions() {
+        match apply_transition(&state, |_| payload.clone()) {
+            Ok(view) => emit_state_changed(app, &view),
+            // Stop on the first failure rather than pressing on: a Start whose
+            // preceding RecoverGap did not commit would be applied against a
+            // block that is still active, and rejected anyway.
+            Err(e) => {
+                eprintln!("resume-gap recovery failed: {e}");
+                return;
+            }
+        }
     }
 }
 
@@ -177,93 +159,32 @@ pub fn run(_app: tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    //! **These tests moved to `crate::gap`, they were not dropped.**
+    //!
+    //! Every assertion that used to live here was about the *decision* — is
+    //! this a gap, does the boundary count, what transition results — and that
+    //! decision now lives in one shared place so this path and startup cannot
+    //! disagree (ADR 0007). `gap.rs` covers all of it, plus the zone neither
+    //! path tested before: a gap short enough to ignore entirely.
+    //!
+    //! One test genuinely changed rather than moved.
+    //! `wake_never_auto_starts_a_task` asserted ADR 0005 open item 9, which
+    //! **ADR 0007 supersedes**: a wake inside the resume limit now does emit a
+    //! `Start`. It is not weakened, it is inverted, and its replacement is
+    //! `gap::tests::a_short_gap_closes_the_block_and_resumes_the_same_work`.
+    //! The old test was right for the old decision.
+    //!
+    //! What is left in this module is the wiring — `handle_resume` needs a live
+    //! `AppHandle` and a real `WM_POWERBROADCAST`, so it is exercised by the
+    //! manual pass (`docs/verification-checklist.md` step 4), not from here.
+
     use super::*;
 
-    fn active_block(name: &str, start: DateTime<Utc>) -> TimeBlock {
-        TimeBlock::new(name.to_string(), None, None, start, 0)
-    }
-
+    /// The one thing still worth pinning locally: this module must keep
+    /// deferring to the shared rule rather than reintroducing a threshold of
+    /// its own. That divergence is exactly what ADR 0007 was written to fix.
     #[test]
-    fn no_gap_when_nothing_active() {
-        let now = Utc::now();
-        assert!(resolve_resume_gap(None, now, now).is_none());
-    }
-
-    #[test]
-    fn no_gap_when_last_activity_is_recent() {
-        let now = Utc::now();
-        let last_activity = now - ChronoDuration::seconds(30); // well under threshold
-        let block = active_block("A", now - ChronoDuration::seconds(60));
-        assert!(resolve_resume_gap(Some(&block), last_activity, now).is_none());
-    }
-
-    #[test]
-    fn resolves_to_recover_gap_alone_when_gap_exceeds_threshold() {
-        let now = Utc::now();
-        let last_activity = now - ChronoDuration::seconds(RESUME_GAP_THRESHOLD_SECS + 60);
-        let block = active_block("A", now - ChronoDuration::seconds(600));
-
-        let recover = resolve_resume_gap(Some(&block), last_activity, now).unwrap();
-
-        match recover {
-            TransitionPayload::RecoverGap { inferred_end } => assert_eq!(inferred_end, last_activity),
-            other => panic!("expected RecoverGap, got {other:?}"),
-        }
-    }
-
-    /// Regression for ADR 0005 open item 9. Wake used to emit `(RecoverGap,
-    /// Start)`, asserting both that the user resumed and when — inventing a
-    /// start time Anchor cannot know (`docs/principles.md` #3). The return type
-    /// is now a single payload precisely so the second transition has nowhere
-    /// to live, but assert the *behaviour* too: a wake must never produce a
-    /// Start, whatever the shape of the signature later becomes.
-    #[test]
-    fn wake_never_auto_starts_a_task() {
-        let now = Utc::now();
-        let last_activity = now - ChronoDuration::seconds(RESUME_GAP_THRESHOLD_SECS + 3600);
-        let block = active_block("A", now - ChronoDuration::seconds(7200));
-
-        let decision = resolve_resume_gap(Some(&block), last_activity, now).unwrap();
-
-        assert!(
-            !matches!(decision, TransitionPayload::Start { .. }),
-            "wake must close the gap and start nothing — the user resumes deliberately"
-        );
-    }
-
-    /// Wake and crash are the same class of event, so they must resolve the
-    /// same way: `state::AppState::init` closes the active entry as a recovered
-    /// gap and starts nothing. Pins that the two paths agree.
-    #[test]
-    fn wake_resolves_the_same_way_startup_recovery_does() {
-        let now = Utc::now();
-        let last_activity = now - ChronoDuration::seconds(RESUME_GAP_THRESHOLD_SECS + 10);
-        let block = active_block("A", now - ChronoDuration::seconds(600));
-
-        let decision = resolve_resume_gap(Some(&block), last_activity, now).unwrap();
-
-        assert!(
-            matches!(decision, TransitionPayload::RecoverGap { .. }),
-            "exactly the transition AppState::init applies on a crashed restart"
-        );
-    }
-
-    #[test]
-    fn boundary_at_exactly_the_threshold_counts_as_a_gap() {
-        // Inclusive boundary: >= threshold, not strictly >. A gap of exactly
-        // RESUME_GAP_THRESHOLD_SECS is just as much "at least that stale" as
-        // one a second longer — there's no reason to special-case equality.
-        let now = Utc::now();
-        let last_activity = now - ChronoDuration::seconds(RESUME_GAP_THRESHOLD_SECS);
-        let block = active_block("A", now - ChronoDuration::seconds(600));
-        assert!(resolve_resume_gap(Some(&block), last_activity, now).is_some());
-    }
-
-    #[test]
-    fn boundary_one_second_under_threshold_is_not_a_gap() {
-        let now = Utc::now();
-        let last_activity = now - ChronoDuration::seconds(RESUME_GAP_THRESHOLD_SECS - 1);
-        let block = active_block("A", now - ChronoDuration::seconds(600));
-        assert!(resolve_resume_gap(Some(&block), last_activity, now).is_none());
+    fn the_wake_threshold_is_the_shared_one() {
+        assert_eq!(RESUME_GAP_THRESHOLD_SECS, crate::gap::CONTINUITY_THRESHOLD_SECS);
     }
 }

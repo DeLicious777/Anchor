@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-08-03
 owner: erich
 related: [docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md, docs/decisions/0001-manual-assisted-tracking-for-mvp.md, docs/product/features/interruption-stack.md, docs/principles.md, docs/risks.md, docs/verification-checklist.md]
@@ -7,7 +7,7 @@ related: [docs/decisions/0005-event-model-time-block-metadata-and-reconstruction
 
 # 0007: Auto-Resume After a Short Gap
 
-> `status: proposed`. **Supersedes the resolution of [ADR 0005](0005-event-model-time-block-metadata-and-reconstruction-transitions.md)'s open item 9** (2026-07-29, "wake stops auto-starting"). That ADR's other decisions are untouched.
+> **`status: accepted` 2026-08-03**, and implemented the same day. **Supersedes the resolution of [ADR 0005](0005-event-model-time-block-metadata-and-reconstruction-transitions.md)'s open item 9** (2026-07-29, "wake stops auto-starting"). That ADR's other decisions are untouched.
 >
 > **This is a requirement change, not implementation evidence.** ADR 0005's reasoning was not found to be wrong, and nothing in the code contradicts it. The author has re-weighed the trade it made — stated there as *"an accurate record over a convenient one"* — and wants the convenience back, bounded. Recorded plainly because [`.claude/docs-standards.md`](../../.claude/docs-standards.md) distinguishes the two, and a later reader needs to know which happened here.
 >

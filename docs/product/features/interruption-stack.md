@@ -99,7 +99,17 @@ Serves the single primary persona in `docs/product/users.md` — the interrupted
 - **Switch/Interrupt hotkeys**: no popup, no focus-stealing — pressing the hotkey performs the transition immediately. If no name was given (see Rename below for the dashboard's manual Switch/Interrupt, which also accepts a blank name), the new Time Block is auto-named `Anchor N` (Technical Constraints).
 - **Rename** (dashboard, "Active" section, visible whenever a task is running): name/project/client fields pre-filled with the active task's current values, editable and savable at any time without affecting the stack or the task's start time. Autocomplete combines Task Templates and distinct past Time Block name/project/client combinations ("history"), each suggestion tagged by source so a template and a same-named past task aren't visually confused.
 - **Return actions**: two distinct hotkeys (Return to Previous, Return to Original) — no prompt needed, since both are unambiguous given the current stack state.
-- **Gap-recovery state**: on relaunch after an ungraceful shutdown, *or* on resume from sleep/hibernate while an entry was active, that entry's end is `EndDetermination::SystemInferred` with an inferred end time, and it is surfaced distinctly in the History View — never silently folded in with `UserDetermined` ends. No prompt interrupts the user in the moment (on wake or on relaunch); correction happens whenever the user next opens the dashboard. **(Correction not yet implemented — the mechanism this sentence assumes does not exist; see `docs/risks.md` R9 and the note at the top of this doc.)**
+- **Gap-recovery state**: on relaunch after an ungraceful shutdown, *or* on resume from sleep/hibernate while an entry was active, that entry's end is `EndDetermination::SystemInferred` with an inferred end time, and it is surfaced distinctly in the History View — never silently folded in with `UserDetermined` ends. No prompt interrupts the user in the moment (on wake or on relaunch); correction happens whenever the user next opens the dashboard. *(Correction shipped 2026-08-02 — Edit Identity and Resize on the History View and Timeline Editor. Risk **R9**'s mechanism gap is closed.)*
+
+  **How long the gap was now changes what happens** ([ADR 0007](../../decisions/0007-auto-resume-after-a-short-gap.md), 2026-08-03), on both paths identically:
+
+  | Gap since the last durable write | Behaviour |
+  |---|---|
+  | under 90 seconds | nothing at all — the entry simply carries on |
+  | 90 seconds to 1 hour | the entry is closed as above, **and the same work is restarted** at the moment of recovery |
+  | 1 hour or more | the entry is closed as above; the user resumes deliberately |
+
+  The middle row supersedes ADR 0005's open item 9, which closed the entry and started nothing regardless of duration. The gap itself is never counted as work — the restarted block begins at recovery, leaving an honest hole where Anchor was not running. The bottom row is the previous behaviour, now scoped to long outages.
 
 ## Technical Constraints
 
