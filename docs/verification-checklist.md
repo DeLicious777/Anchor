@@ -172,6 +172,23 @@ Add a dated line below for each full pass, including clean ones.
 | Date | Commit | OS / build | Outcome | Notes |
 |---|---|---|---|---|
 | 2026-08-03 | `936281f` | Win 11 Pro 10.0.26200 · de-DE · W. Europe (UTC+1, DST on) | 🟢 **14/14 PASS** | First validated baseline — tagged `validated-baseline-1`. See below. |
+| 2026-08-03 | `122d3ab` | Win 11 Pro 10.0.26200 · de-DE · W. Europe (UTC+1, DST on) | ⏳ **partial — 4a/4b/4c only** | ADR 0007's three gap zones verified against the running binary. **Not** a baseline: steps 1–3, 5–11 and 14 not re-run. |
+
+### Run 2 (partial) — 2026-08-03, commit `122d3ab`
+
+ADR 0007 changed gap recovery, so step 4 was re-run in all three of its new zones. The preconditions were constructed by seeding `transitions.jsonl` with a backdated `start` (checksum reproduced and verified against a line the app itself wrote) and launching the real desktop binary — the *decision* under test is what the running `AppState::init` does, and that is what was observed.
+
+| Zone | Expected | Observed |
+|---|---|---|
+| **4c** — 12s gap | no transition at all | ✅ log holds only the seeded `start`; the block carried on |
+| **4a** — 10min gap | close at last durable write, restart at recovery | ✅ `recover-gap → 16:45:47`, then `start` at `16:55:56` |
+| **4b** — 9h gap | close only | ✅ `recover-gap → 07:57:30`, nothing restarted |
+
+The middle row is the guarantee worth naming: the gap closed at the last durable write while the resumed block starts ten minutes later, so the outage stays a visible hole rather than billable time.
+
+**4c is the fix for run 1's artifact.** That same 12-second outage previously wrote a `recover-gap` whose `inferred_end` equalled the start, producing a zero-duration block. It now writes nothing.
+
+**Why this is not `validated-baseline-2`.** Steps 1–3, 5–11 and 14 require driving the native window, which this run could not do. They are unchanged code paths that passed in run 1, but the premise of this checklist is that seams fail where nobody looked — an assumption of "unchanged, therefore fine" is exactly what it exists to distrust. A full pass by hand is still owed before tagging.
 
 ### Run 1 — 2026-08-03, commit `936281f`
 
