@@ -499,8 +499,22 @@
       {/if}
     </div>
     <div class="row">
+      <!-- Only ever offer transitions whose precondition currently holds.
+           `Start` requires nothing active, `Switch` and `Interrupt` require
+           something active — the domain rejects the others with NoActiveTask /
+           AlreadyActive. Showing a button that can only fail teaches the user
+           that Anchor's buttons are unreliable, when in fact the state model is
+           doing its job.
+
+           This is presentation deciding from live state, not the domain
+           branching — the same split ADR 0005 made when `switch` stopped
+           silently meaning `Start`. The buttons narrow what is *offered*; they
+           do not enforce anything, and the commands stay independently
+           callable and independently validated. -->
       <button onclick={doStartOrSwitch}>{view.active ? "Switch" : "Start"}</button>
-      <button onclick={doInterrupt}>Interrupt</button>
+      {#if view.active}
+        <button onclick={doInterrupt}>Interrupt</button>
+      {/if}
     </div>
   </section>
 
