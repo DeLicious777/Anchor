@@ -165,7 +165,7 @@ Add a dated line below for each full pass, including clean ones.
 
 | Date | Commit | OS / build | Outcome | Notes |
 |---|---|---|---|---|
-| 2026-08-03 | `936281f` | Win 11 Pro 10.0.26200 · de-DE · W. Europe (UTC+1, DST on) | **13/14 — no failures, step 14 outstanding** | Steps 1–11 by hand; 12–13 verified against the log and snapshot. See below. |
+| 2026-08-03 | `936281f` | Win 11 Pro 10.0.26200 · de-DE · W. Europe (UTC+1, DST on) | 🟢 **14/14 PASS** | First validated baseline — tagged `validated-baseline-1`. See below. |
 
 ### Run 1 — 2026-08-03, commit `936281f`
 
@@ -181,6 +181,6 @@ Two earlier kills in the same log confirm the mechanism with heartbeats landing:
 
 Re-run with a graceful close (`WM_CLOSE`): `transitions.jsonl` 55 records → **0**, and `snapshot.json` appeared (v2, watermark 54, 28 closed blocks, 10 issued auto-names). Relaunching from that snapshot and closing again produced a second snapshot whose fingerprint over every block's id, name, span, capture origin and end determination is **identical** — replay across the compaction boundary is lossless.
 
-**Step 14: not yet run.** Requires editing a block that existed *before* the compaction. Now trivially available: every one of the 28 blocks is below the watermark, so any row edit followed by a restart exercises it.
+**Step 14: passed.** `edit-identity` at seq 55 targeting `c55f846f` — the block `Anchor 7`, one of the 28 held **only** in the snapshot. The log was empty before that edit, so the target could not have come from any surviving log line. **A14 confirmed on the running application**, not merely in a test: a block below the watermark is still a valid reconstruction target.
 
-**Not eligible for `validated-baseline-1` until step 14 passes** — it is the only step that proves a block below the watermark is still addressable (**A14**).
+**Outcome: 🟢 14/14, tagged `validated-baseline-1`.** Anchor now has something it did not have before this run — not just components asserted correct in isolation, but the whole system observed behaving correctly end to end.
