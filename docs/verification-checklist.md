@@ -165,4 +165,22 @@ Add a dated line below for each full pass, including clean ones.
 
 | Date | Commit | OS / build | Outcome | Notes |
 |---|---|---|---|---|
-| _(not yet run)_ | | | | |
+| 2026-08-03 | `936281f` | Win 11 Pro 10.0.26200 · de-DE · W. Europe (UTC+1, DST on) | **13/14 — no failures, step 14 outstanding** | Steps 1–11 by hand; 12–13 verified against the log and snapshot. See below. |
+
+### Run 1 — 2026-08-03, commit `936281f`
+
+**Steps 1–3, 5–11: passed by hand.**
+
+**Step 4: passed** — initially reported as a failure, reclassified on evidence. The log shows `start Anchor 5 @16:02:44` then `recover-gap inferred_end=16:02:44` written at 16:02:57. The inferred end is the **last durable write, not the relaunch** — which is exactly what the step checks. "No active task after relaunching" is the specified behaviour, not a fault: `RecoverGap` deliberately does not auto-resume.
+
+Two earlier kills in the same log confirm the mechanism with heartbeats landing: `A` 52s, `Weiterentwicklung - Anchor` 102s.
+
+*Observation, not a defect:* a kill inside the first heartbeat interval makes the start itself the last durable write, so the recovered block has a **zero-second duration** (`Anchor 5`). Within R4's ~60s bound and therefore correct, but a 0-minute block on the timeline is an artifact worth a deliberate decision rather than a discovery later.
+
+**Steps 12–13: passed, verified directly.** The first attempt left no snapshot because the app was stopped by killing npm — `RunEvent::Exit` never fires that way, so `compact_on_shutdown` never runs. Not a defect, but note that **step 4 and step 12 need different shutdown methods**, and using the ungraceful one for both makes each look ambiguous.
+
+Re-run with a graceful close (`WM_CLOSE`): `transitions.jsonl` 55 records → **0**, and `snapshot.json` appeared (v2, watermark 54, 28 closed blocks, 10 issued auto-names). Relaunching from that snapshot and closing again produced a second snapshot whose fingerprint over every block's id, name, span, capture origin and end determination is **identical** — replay across the compaction boundary is lossless.
+
+**Step 14: not yet run.** Requires editing a block that existed *before* the compaction. Now trivially available: every one of the 28 blocks is below the watermark, so any row edit followed by a restart exercises it.
+
+**Not eligible for `validated-baseline-1` until step 14 passes** — it is the only step that proves a block below the watermark is still addressable (**A14**).
