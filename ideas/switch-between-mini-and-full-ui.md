@@ -7,6 +7,12 @@ A way to toggle between the two existing windows (the always-on-top mini widget 
 - **A true mode switch**: exactly one window visible at a time. Not a bring-to-front convenience, and not configurable to keep both — one window, one mode.
 - **Hide, never close.** Both windows are declared statically in `app/src-tauri/tauri.conf.json`; hiding preserves window state and avoids a re-create path. Nothing about the switch touches tracking state, which lives in the Rust `AppState`/transition log, not in either window.
 
+## Related decision shipped (2026-08-04)
+
+**Closing either window now exits the app** (#22). That was a durability fix, not this idea: the widget used to keep the process alive after the dashboard closed, so `RunEvent::Exit` never fired and ADR 0004's clean-shutdown compaction silently never ran.
+
+It shares this idea's premise — one active view, not two independently-managed windows — and the two stay compatible **because this idea specifies hide, never close**. Hiding raises no `CloseRequested`, so a mode switch will not trip the exit path. Had the switch been built by closing windows instead, the two would be in direct conflict.
+
 ## Still open
 
 - **What triggers it** — a sixth global hotkey alongside the five already registered (`HotkeyAction::{Switch, Interrupt, ReturnPrevious, ReturnOriginal, Complete}` in `app/src-tauri/src/hotkeys.rs`), a UI control on each window, or both? A hotkey fits the project's fast-interaction thesis; a UI control is discoverable. These aren't exclusive.

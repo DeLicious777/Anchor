@@ -88,6 +88,7 @@ Watch: exporting writes nothing — `transitions.jsonl` is no longer than before
 ### Persistence
 
 **12. Close the app with the close button** (a clean shutdown — this is what triggers compaction).
+*Closing **either** window exits Anchor as of 2026-08-04 (#22). Before that the widget kept the process alive, so closing the dashboard looked like a clean shutdown and silently was not — which is why runs 1 and 2 both failed to produce a snapshot here.*
 Watch: `snapshot.json` appears, and `transitions.jsonl` is now **empty**. If the snapshot is missing while the log is empty, stop: that is total data loss and the ordering guarantee has been violated.
 
 **13. Relaunch.**

@@ -74,6 +74,22 @@ pub fn run() {
                 })
                 .build(),
         )
+        // **Closing either window exits Anchor** (#22). Both windows are declared
+        // statically, so before this the widget kept the process alive after the
+        // dashboard was closed: `RunEvent::Exit` never fired, and with it neither
+        // did ADR 0004's clean-shutdown compaction — silently, and while the user
+        // reasonably believed the app had stopped.
+        //
+        // This is the immediate half of the decision recorded on #22 and in
+        // `ideas/switch-between-mini-and-full-ui.md`: exactly one view is active
+        // at a time, so closing the one you can see means "I am done". The other
+        // half — a true mode switch that *hides* rather than closes — is separate
+        // work, and stays compatible: hiding never raises CloseRequested.
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                window.app_handle().exit(0);
+            }
+        })
         .setup(|app| {
             let handle = app.handle();
             let log_path = paths::log_file_path(handle)?;
