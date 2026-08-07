@@ -110,7 +110,7 @@ This changes `HotkeyBindings` from five fields to six, and that struct is applie
 - `heartbeat::should_beat` returns the `active.is_some()` flag, so **heartbeats stop on their own while paused**. Nothing is logged during a break, and `last_activity_at` stops advancing — which is correct, because there is nothing whose end would need bounding.
 - Replay reconstructs the paused state from the persisted stack like any other state, and the snapshot carries `InterruptionStack` whole. **This is why Continue Session needs no transition** (ADR 0005:70) — verified rather than trusted.
 
-**10. `Complete` stays rejected while paused, and that is the right answer.** The stack is non-empty, so `CannotCompleteWithOpenStack` applies. Completing *what*? The paused task is not finished — if it were, the user would have completed it instead of pausing. To finish a paused day the user resolves the frames: Continue then Complete, or dismiss them from the Interruption History panel. **Pause is not "stop tracking forever"; it is "stop tracking, intending to return."**
+**10. `Complete` stays rejected while paused, and that is the right answer.** The stack is non-empty, so `CannotCompleteWithOpenStack` applies. Completing *what*? The paused task is not finished — if it were, the user would have completed it instead of pausing. To finish a paused day the user **continues, then completes**. Dismissing the remaining frames from the Interruption History panel empties the stack but does **not** on its own make `Complete` available: the arm checks the stack first and then requires an active task, and while paused there is none. *(Clarified 2026-08-07 against the arm itself. This previously read "Continue then Complete, or dismiss them", which offered dismissal as an equivalent route to finishing; it is not one, and it is the only route a user would find by following the panel.)* **Pause is not "stop tracking forever"; it is "stop tracking, intending to return."**
 
 **11. A frame created by Pause is dismissible exactly like any other**, and dismissal records `Skipped` — meaning *I paused and never went back*, which is true. `interruption-history.md` decision 5 owns this; nothing is added here.
 
@@ -177,7 +177,7 @@ Owned by the ux-designer. Stack semantics are `interruption-stack.md`'s and are 
 
 - **Pause** is available whenever a task is active, on the dashboard and via its hotkey — **not on the widget**, for the reason above. It is unavailable, not merely inert, when nothing is active, since its precondition cannot hold.
 - While paused, the resume control reads **Continue** and invokes Return to Previous (decision 5). *Return to Original* keeps its name and remains available whenever the stack is non-empty.
-- **Complete stays visibly unavailable while paused**, and the reason is stated rather than left to a disabled control: the stack is not empty. This is the one place a user is most likely to expect Complete to work.
+- **Complete stays visibly unavailable while paused**, and the reason is stated rather than left to a disabled control. The reason **changes** as frames are resolved: while frames remain it is the non-empty stack; once they are all dismissed it is that nothing is active to complete. Both are stated as they apply, because a control that stays greyed out for a reason that silently changed is worse than one that never moved.
 - **Nothing prompts on pause.** No "are you still there", no idle detection, no suggestion to resume — ADR 0001.
 
 ### In Interruption History
@@ -229,7 +229,7 @@ Entering the paused state uses `visual-redesign.md`'s 150–200 ms ease-out. Not
 - Return to Original while paused resumes the root and marks every non-root frame `Skipped`, **including the paused task when it is not the root** — and the return preview stated that count beforehand.
 - `Start` while paused begins a new task, leaves every frame in place, and resolves nothing.
 - Dismissing a Pause-created frame records `Skipped` and does not change what is active.
-- `Complete` while paused is rejected, and becomes available once the stack is empty.
+- `Complete` while paused is rejected. Emptying the stack — by dismissing every frame — does **not** make it available while paused, because the active task is still absent; it becomes available only after work is started or continued.
 
 **Durability**
 
