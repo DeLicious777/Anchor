@@ -1,5 +1,7 @@
 # Adjustable timeline view
 
+> **Promoted to design 2026-08-04.** This idea now has a feature document — [`docs/product/features/timeline-editor.md`](../docs/product/features/timeline-editor.md), currently `status: draft` — which is where its decisions live from here. Four of the six "Still open" questions below are settled there (orientation, the toggle, time range, short blocks); the remaining two are carried into that doc's open Alternatives. This file stays as the inbox record of how the idea started, per `CLAUDE.md` — it is not held to feature-doc rigour and should not be updated to track the design.
+
 A timeline visualization of the day's Time Blocks, shown **beside** the dashboard's existing table rather than replacing it — the table stays the detail view, the timeline gives shape to the day at a glance.
 
 Note: `docs/product/features/interruption-stack.md` already calls the dashboard's table "the timeline view" and has an accepted acceptance criterion on it (line 102). This idea adds a *second representation of the same data*, so the two need distinct names in the docs to stay unambiguous.

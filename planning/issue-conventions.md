@@ -15,6 +15,8 @@ Two orthogonal dimensions, kept as labels (the "Epic" grouping itself lives in t
 
 Imperative, concrete, no epic prefix needed (the Project board's Epic field covers that): `Implement append-only transition log writer`, not `[Interruption Stack] logging`.
 
+**One exception, which was already the practice and is now written down (2026-08-07): the umbrella issue for an epic is titled `Epic: <name>`**, matching its `planning/epics/*.md` file. #1, #2 and #3 have used this since 2026-07-24 while this section said no prefix was needed — a contradiction between the convention and its own examples. It matters because without it an epic issue and its first child issue can end up with near-identical titles, which is exactly what happened to #16 and #23 during the M3 pass before both were corrected.
+
 ## Issue body — required links
 
 Every issue must link:
@@ -27,8 +29,8 @@ An ADR never gets its own issue — it's a decision record, not a work item. The
 
 **Fields:**
 - `Status` (single-select): Todo, In Progress, Blocked, Done
-- `Epic` (single-select): Interruption Stack, Task Templates, Export — matches `planning/epics/*.md` exactly; add a new option only when a new epic file is created
-- `Milestone` (GitHub's native milestone field): M1 — Core Tracking Loop, M2 — MVP Complete, matching `planning/milestones.md`
+- `Epic` (single-select): Interruption Stack, Task Templates, Export, **Visual Redesign, Timeline Reconstruction, Timeline Editor, Interruption History, Pause** — matches `planning/epics/*.md` exactly; add a new option only when a new epic file is created. *(The five bold options were added 2026-08-07 with the M3 planning pass, when every remaining accepted feature doc gained an epic file.)*
+- `Milestone` (GitHub's native milestone field): M1 — Core Tracking Loop, M2 — MVP Complete, **M3 — Editable Timeline**, matching `planning/milestones.md`
 
 **Views:**
 - Board, grouped by `Status` — the default day-to-day working view
