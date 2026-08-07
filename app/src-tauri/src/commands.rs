@@ -16,6 +16,7 @@ use crate::settings::HotkeyBindings;
 use crate::stack::InterruptionStack;
 use crate::state::AppState;
 use crate::templates::{mutate_templates, TemplateState};
+use crate::view_range::{mutate_view_range, ViewRange, ViewRangeState};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -449,6 +450,20 @@ pub fn update_export_settings(
         s.rounding_enabled = rounding_enabled;
         s.rounding_interval_minutes = rounding_interval_minutes;
     })
+}
+
+#[tauri::command]
+pub fn get_view_range(state: State<ViewRangeState>) -> Result<ViewRange, String> {
+    let range = state.inner.lock().map_err(|_| "view range lock poisoned".to_string())?;
+    Ok(range.clone())
+}
+
+#[tauri::command]
+pub fn set_view_range(
+    state: State<ViewRangeState>,
+    range: ViewRange,
+) -> Result<ViewRange, String> {
+    mutate_view_range(&state, |current| *current = range)
 }
 
 fn rounding_interval(rounding_enabled: bool, rounding_interval_minutes: u32) -> Option<u32> {
