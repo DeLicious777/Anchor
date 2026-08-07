@@ -338,6 +338,24 @@ pub enum TransitionPayload {
     /// Delete is confirmed instead, and a mistaken delete is recovered by
     /// re-adding (`timeline-reconstruction.md`).
     Delete { target: Uuid },
+    /// Resolve an open interruption frame **without resuming it** — the user is
+    /// not going back to that work.
+    ///
+    /// Writes the existing `InterruptionOutcome::Skipped`, because the domain
+    /// fact is identical to any other unresumed interruption: *this work was
+    /// interrupted and never resumed*. [ADR 0005](../../../docs/decisions/0005-event-model-time-block-metadata-and-reconstruction-transitions.md)
+    /// rejected an `Abandoned` value for exactly this reason — how a frame came
+    /// to be resolved is the event model's business, not the persisted state's.
+    ///
+    /// **Identifies the frame by its paused Time Block's id, never by position
+    /// in the stack.** A stack index is invalidated by any concurrent change,
+    /// and a command keyed on one could resolve a different frame than the one
+    /// the user chose; the id is durable across replay and compaction
+    /// ([ADR 0006](../../../docs/decisions/0006-stable-persistent-time-block-identity.md)).
+    ///
+    /// Not a return: `active` is untouched, so this creates no third return path
+    /// (`docs/product/features/interruption-history.md` decision 5).
+    DismissFrame { target: Uuid },
 }
 
 #[cfg(test)]

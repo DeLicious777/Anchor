@@ -330,6 +330,29 @@ pub fn delete_block(app: AppHandle, state: State<AppState>, target: Uuid) -> Res
     Ok(view)
 }
 
+/// Resolves an open interruption frame without resuming it, recording its
+/// paused Time Block as `Skipped`.
+///
+/// `target` is the **paused block's id**, not a stack position — the domain
+/// locates the frame by it, so a stack that changed between render and click
+/// cannot resolve the wrong frame.
+///
+/// **Confirmation is the frontend's job**, exactly as it is for `delete_block`:
+/// dismissal permanently marks real work as never-resumed and MVP has no undo
+/// (`interruption-history.md` decision 5, risk **R17**). What lives here is the
+/// guarantee that reaching this function writes exactly one transition.
+///
+/// No caller exists yet, and that is the point: this is the enabling half of
+/// #24. Until the Interruption History panel ships there is no surface to
+/// dismiss from, so `StackError::BlockReferencedByOpenFrame`'s advice to
+/// "resume or dismiss" remains only half true.
+#[tauri::command]
+pub fn dismiss_frame(app: AppHandle, state: State<AppState>, target: Uuid) -> Result<StackView, String> {
+    let view = apply_transition(&state, |_| TransitionPayload::DismissFrame { target })?;
+    emit_state_changed(&app, &view);
+    Ok(view)
+}
+
 #[tauri::command]
 pub fn return_previous(app: AppHandle, state: State<AppState>) -> Result<StackView, String> {
     let view = apply_transition(&state, |_| TransitionPayload::ReturnPrevious)?;

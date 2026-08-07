@@ -465,6 +465,74 @@ mod tests {
         assert!(inner.stack.active.is_some(), "and it carried on across the restart");
     }
 
+    /// A dismissal must survive both durability paths identically: replayed
+    /// from the log, and restored from a snapshot after the log is truncated.
+    ///
+    /// Worth asserting end to end rather than trusting the arm. `log::reader`
+    /// calls `apply` directly with no dry-run guard, and compaction persists
+    /// `InterruptionStack` whole — so a frame removed live but not on replay,
+    /// or an outcome that survives replay but not the snapshot, would be a
+    /// silent divergence between what the user saw and what the app reopens to.
+    #[test]
+    fn a_dismissal_survives_replay_and_a_snapshot_round_trip() {
+        use crate::commands::apply_transition;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+
+        // (open frame ids, active id, closed blocks with their outcomes)
+        type Fingerprint = (Vec<uuid::Uuid>, Option<uuid::Uuid>, Vec<(uuid::Uuid, Option<crate::model::InterruptionOutcome>)>);
+        let fingerprint = |s: &AppState| -> Fingerprint {
+            let inner = s.inner.lock().unwrap();
+            (
+                inner.stack.stack.iter().map(|f| f.paused_time_block_id).collect(),
+                inner.stack.active.as_ref().map(|b| b.id),
+                inner.stack.closed.iter().map(|b| (b.id, b.interruption_outcome)).collect(),
+            )
+        };
+
+        let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+        let named = |n: &str| TransitionPayload::Interrupt { name: n.into(), project: None, client: None };
+        apply_transition(&state, |_| TransitionPayload::Start { name: "root".into(), project: None, client: None }).unwrap();
+        apply_transition(&state, |_| named("phone")).unwrap();
+        apply_transition(&state, |_| named("colleague")).unwrap();
+
+        // Dismiss the middle frame — the case a pop-based implementation gets wrong.
+        let middle = {
+            let inner = state.inner.lock().unwrap();
+            assert_eq!(inner.stack.stack.len(), 2);
+            inner.stack.stack[1].paused_time_block_id
+        };
+        apply_transition(&state, move |_| TransitionPayload::DismissFrame { target: middle }).unwrap();
+
+        let live = fingerprint(&state);
+        assert_eq!(live.0.len(), 1, "one frame left, live");
+        assert!(
+            live.2.iter().any(|(id, outcome)| *id == middle && *outcome == Some(crate::model::InterruptionOutcome::Skipped)),
+            "the dismissed block is Skipped, live"
+        );
+        drop(state);
+
+        // Path 1: replayed from the log, with no snapshot present.
+        assert!(!snapshot_path.exists(), "nothing has compacted yet");
+        let (replayed, _) = AppState::init(&path, &snapshot_path).unwrap();
+        assert_eq!(fingerprint(&replayed), live, "replay must reproduce what the live run produced");
+
+        // Path 2: snapshot written and the log truncated, then reopened.
+        compact_on_shutdown(&replayed);
+        drop(replayed);
+        assert!(snapshot_path.exists(), "shutdown compaction wrote a snapshot");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "", "and truncated the log");
+
+        let (restored, _) = AppState::init(&path, &snapshot_path).unwrap();
+        assert_eq!(
+            fingerprint(&restored),
+            live,
+            "the snapshot must restore the dismissal identically, with the log gone"
+        );
+    }
+
     /// Heartbeats must never drive compaction. ADR 0004 is explicit: a
     /// heads-down day with no manual transitions still writes ~480 heartbeat
     /// lines, and compacting on that volume is not what the trigger is for.

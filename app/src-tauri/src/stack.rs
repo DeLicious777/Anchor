@@ -59,6 +59,8 @@ pub enum StackError {
          refers to it — resume or dismiss that interruption first. Its identity can still be corrected."
     )]
     BlockReferencedByOpenFrame(Uuid),
+    #[error("no unresolved interruption refers to Time Block {0} — there is no frame to dismiss")]
+    FrameNotFound(Uuid),
     #[error("that span overlaps work already on the timeline")]
     OverlapsExistingBlock,
     #[error("a Time Block cannot end in the future — every block represents work that actually happened")]
@@ -323,6 +325,33 @@ impl InterruptionStack {
                     frame.project = project.clone();
                     frame.client = client.clone();
                 }
+                Ok(())
+            }
+            TransitionPayload::DismissFrame { target } => {
+                // Located by the paused block's id, never by stack position —
+                // see the payload's own doc comment for why an index will not do.
+                let index = self
+                    .stack
+                    .iter()
+                    .position(|f| f.paused_time_block_id == *target)
+                    .ok_or(StackError::FrameNotFound(*target))?;
+
+                // Resolve BEFORE removing, so a failure leaves the stack exactly
+                // as it was. Same discipline the `ReturnPrevious` arm documents:
+                // `log::reader` calls `apply` directly with no dry-run guard, so
+                // a half-applied arm corrupts replay rather than returning an
+                // error. `remove` cannot fail — `position` just proved the index.
+                self.resolve_paused(*target, InterruptionOutcome::Skipped)?;
+                self.stack.remove(index);
+
+                // `active` is deliberately untouched. Dismissal resolves a frame
+                // without resuming it, which is what keeps it from being a third
+                // return path. Removing a frame from the middle preserves the
+                // order of the rest, so Return to Previous still lands on the
+                // top frame — and dismissing the *root* re-points Return to
+                // Original at the next-deepest frame, since "original" is the
+                // bottom of the stack when that command runs, not a stored
+                // identity.
                 Ok(())
             }
             TransitionPayload::Delete { target } => {
@@ -693,6 +722,138 @@ mod tests {
             Some(EndDetermination::SystemInferred),
             "the end is unchanged, so its determination is too"
         );
+    }
+
+    /// Dismissing a frame from the **middle** of the stack: exactly that frame
+    /// goes, the rest keep their order, and nothing about `active` moves.
+    ///
+    /// The middle is the case worth testing rather than the top — a top-frame
+    /// dismissal cannot tell a correct implementation from one that pops.
+    #[test]
+    fn dismissing_a_middle_frame_removes_only_it_and_preserves_the_rest() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "root", 0);
+        interrupt(&mut s, "phone", 3600);
+        interrupt(&mut s, "colleague", 7200);
+        assert_eq!(s.stack.len(), 2, "root paused by phone, phone paused by colleague");
+
+        let root_frame = s.stack[0].paused_time_block_id;
+        let middle_frame = s.stack[1].paused_time_block_id;
+        let active_before = s.active.as_ref().unwrap().id;
+
+        s.apply(&TransitionPayload::DismissFrame { target: middle_frame }, t(10800), 9).unwrap();
+
+        assert_eq!(s.stack.len(), 1);
+        assert_eq!(s.stack[0].paused_time_block_id, root_frame, "the root frame survives, still at the bottom");
+        assert_eq!(
+            s.active.as_ref().unwrap().id,
+            active_before,
+            "dismissal is not a return — the active task is untouched"
+        );
+
+        let dismissed = s.closed.iter().find(|b| b.id == middle_frame).unwrap();
+        assert_eq!(dismissed.interruption_outcome, Some(InterruptionOutcome::Skipped));
+        assert_eq!(s.derived_status(dismissed), DerivedInterruptionStatus::Skipped);
+
+        let root_block = s.closed.iter().find(|b| b.id == root_frame).unwrap();
+        assert_eq!(
+            s.derived_status(root_block),
+            DerivedInterruptionStatus::Pending,
+            "the surviving frame's block is untouched and still owes an outcome"
+        );
+    }
+
+    /// Dismissing the **root** re-points Return to Original, because "original"
+    /// is the bottom of the stack when that command runs — not a stored
+    /// identity. The domain is not changed here; this pins the consequence so a
+    /// future change to `ReturnOriginal` cannot alter it silently.
+    #[test]
+    fn dismissing_the_root_frame_repoints_return_to_original() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "root", 0);
+        interrupt(&mut s, "phone", 3600);
+        interrupt(&mut s, "colleague", 7200);
+        let root_frame = s.stack[0].paused_time_block_id;
+
+        s.apply(&TransitionPayload::DismissFrame { target: root_frame }, t(10800), 9).unwrap();
+        s.apply(&TransitionPayload::ReturnOriginal, t(14400), 10).unwrap();
+
+        assert_eq!(
+            s.active.as_ref().unwrap().name,
+            "phone",
+            "with the root dismissed, Return to Original lands on what is now the deepest frame"
+        );
+        assert!(s.stack.is_empty());
+    }
+
+    /// The two rejections, both asserted to leave the projection byte-identical.
+    /// `log::reader` calls `apply` directly with no dry-run guard, so an arm
+    /// that mutates before it fails corrupts replay rather than erroring.
+    #[test]
+    fn a_rejected_dismissal_changes_nothing_at_all() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "root", 0);
+        interrupt(&mut s, "phone", 3600);
+        s.apply(
+            &TransitionPayload::Switch { name: "unrelated".into(), project: None, client: None },
+            t(7200),
+            8,
+        )
+        .unwrap();
+
+        // `TimeBlock` and `StackFrame` derive no `PartialEq`, so the projection
+        // is captured as the facts a dismissal could plausibly damage.
+        let fingerprint = |s: &InterruptionStack| {
+            (
+                s.stack.iter().map(|f| f.paused_time_block_id).collect::<Vec<_>>(),
+                s.active.as_ref().map(|b| b.id),
+                s.closed.iter().map(|b| (b.id, b.interruption_outcome)).collect::<Vec<_>>(),
+            )
+        };
+        let before = fingerprint(&s);
+
+        let unknown = Uuid::from_u128(0xdead_beef);
+        assert_eq!(
+            s.apply(&TransitionPayload::DismissFrame { target: unknown }, t(10800), 9),
+            Err(StackError::FrameNotFound(unknown)),
+            "an id no frame refers to"
+        );
+
+        // A real, closed, but *unreferenced* block — the near-miss that a
+        // careless implementation would happily mark Skipped.
+        let unreferenced = s.closed.iter().find(|b| b.name == "phone").unwrap().id;
+        assert_eq!(
+            s.apply(&TransitionPayload::DismissFrame { target: unreferenced }, t(10800), 9),
+            Err(StackError::FrameNotFound(unreferenced)),
+            "a closed block with no open frame is not dismissable"
+        );
+
+        assert_eq!(fingerprint(&s), before, "a rejected dismissal must leave the projection untouched");
+    }
+
+    /// Dismissal writes the *same* value Return to Original writes for the
+    /// frames it skips — ADR 0005 rejected a separate `Abandoned`, so the two
+    /// routes are deliberately indistinguishable in the record.
+    #[test]
+    fn a_dismissed_frame_is_indistinguishable_from_one_skipped_by_return_original() {
+        let mut dismissed = InterruptionStack::new();
+        start(&mut dismissed, "root", 0);
+        interrupt(&mut dismissed, "phone", 3600);
+        let via_dismiss = dismissed.stack[0].paused_time_block_id;
+        dismissed.apply(&TransitionPayload::DismissFrame { target: via_dismiss }, t(7200), 9).unwrap();
+
+        let mut skipped = InterruptionStack::new();
+        start(&mut skipped, "root", 0);
+        interrupt(&mut skipped, "phone", 3600);
+        interrupt(&mut skipped, "colleague", 7200);
+        let via_return = skipped.stack[1].paused_time_block_id;
+        skipped.apply(&TransitionPayload::ReturnOriginal, t(10800), 9).unwrap();
+
+        let a = dismissed.closed.iter().find(|b| b.id == via_dismiss).unwrap();
+        let b = skipped.closed.iter().find(|b| b.id == via_return).unwrap();
+        assert_eq!(a.interruption_outcome, b.interruption_outcome);
+        assert_eq!(dismissed.derived_status(a), skipped.derived_status(b));
+        assert_eq!(a.interruption_outcome, Some(InterruptionOutcome::Skipped));
     }
 
     /// The "identity only" tier, on the two operations that reshape rather than

@@ -251,7 +251,16 @@ impl CompactionTrigger {
 fn counts_toward_compaction(payload: &TransitionPayload) -> bool {
     use TransitionPayload::*;
     match payload {
-        Start { .. } | Switch { .. } | Interrupt { .. } | ReturnPrevious | ReturnOriginal | Complete => true,
+        Start { .. } | Switch { .. } | Interrupt { .. } | ReturnPrevious | ReturnOriginal | Complete
+        // `DismissFrame` counts, and the line it falls on is worth stating
+        // because it is not the reconstruction/capture split used below.
+        // **A transition counts when it writes an `InterruptionOutcome`.**
+        // `ReturnPrevious` writes `Resumed`, `ReturnOriginal` writes `Resumed`
+        // plus `Skipped`, and dismissal writes the same `Skipped` — all three
+        // settle what became of interrupted work and mutate the live `stack`.
+        // The reconstruction transitions below write no outcome and touch only
+        // closed blocks.
+        | DismissFrame { .. } => true,
         // Enumerated rather than a catch-all `_ => false`, so adding a
         // transition forces a decision here instead of silently defaulting.
         // It did exactly that for the two below, which postdate ADR 0004's list.

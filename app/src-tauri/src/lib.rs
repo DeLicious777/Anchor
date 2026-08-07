@@ -148,6 +148,7 @@ pub fn run() {
             commands::resize_block,
             commands::edit_identity,
             commands::delete_block,
+            commands::dismiss_frame,
             commands::return_previous,
             commands::return_original,
             commands::complete,
