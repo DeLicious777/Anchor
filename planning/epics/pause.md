@@ -46,7 +46,7 @@ Stopping work becomes expressible without falsifying the record. Today `Complete
 
 ## Exit criteria
 
-`pause.md`'s Acceptance Criteria, notably: pausing twice is rejected; restart, crash and sleep while paused append **no** transition at any elapsed time; no heartbeat is written during a break; `Complete` becomes available once the stack empties.
+`pause.md`'s Acceptance Criteria, notably: pausing twice is rejected; restart, crash and sleep while paused append **no** transition at any elapsed time; no heartbeat is written during a break; and `Complete` becomes available once the stack empties **and a task is active** — emptying the stack while paused is not enough on its own.
 
 ## Can it progress without the design-system assets?
 

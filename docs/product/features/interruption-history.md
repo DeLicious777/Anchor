@@ -105,7 +105,7 @@ At *d* = 1 the two actions are identical and the panel says so rather than showi
 - **Any frame may be dismissed, not only the top one.** Dismissal is not a return: it resolves a frame without changing the active task, so the ordering of the remaining frames is untouched and no "third return path" is created.
 - **Dismissing the root frame re-points *Return to Original*, and the panel must say so.** *(Found on this document's own review, which had left it undefined.)* "Original" is not a stored identity — `apply`'s `ReturnOriginal` arm resumes whatever sits at the bottom of the stack when it runs. Dismiss the root and the next-deepest frame silently inherits that role. The domain is right to work this way and is not changed here; what is unacceptable is the *silence*, so the confirmation for a root frame states which task becomes the new Return-to-Original target. At depth 1 that target becomes none, which is the same statement as "the stack becomes empty."
 - **It is confirmed**, on the same grounds as Delete (`timeline-reconstruction.md`): it permanently marks real work as never-resumed, MVP has no undo, and the `Skipped` value is what `DerivedInterruptionStatus` publishes to every consumer including export's grouping. The persona rule reserves confirmations for exactly this.
-- **Dismissing the last frame empties the stack**, which makes `Complete` legal again — `apply`'s `Complete` arm rejects a non-empty stack. That is a real consequence and the confirmation says so.
+- **Dismissing the last frame empties the stack, and whether that makes `Complete` available depends on what is running.** `apply`'s `Complete` arm checks two things in order: it rejects a non-empty stack, then requires an active task. So emptying the stack is *necessary* and not *sufficient* — with a task active, `Complete` becomes available; while **paused** (`active == None`) it stays unavailable, now for the second reason rather than the first, until work is started or continued. The confirmation states whichever of the two actually applies.
 - **The transition does not exist yet.** ADR 0005 lists frame dismissal among its new transitions and it was never built. This is the feature's one hard implementation dependency; see Technical Constraints.
 
 **6. A frame states what it is blocking.** Where a frame's paused block is `Pending` — which is *every* open frame, by `derived_status`'s definition — the panel says that the block cannot be reshaped until this frame is resolved, and resolving it here is what lifts the restriction. This is the missing half of `timeline-editor.md` decision 7 and of the History View's disabled time fields: those surfaces state a restriction, and this is the only surface that can remove it.
@@ -195,7 +195,7 @@ Owned by the ux-designer. Stack semantics are `interruption-stack.md`'s and are 
 
 ### Dismissal
 
-- **Confirmed inline, in its own full-width row**, naming the task and stating three things: the block will be recorded as **skipped**, there is **no undo**, and if it is the last frame the stack becomes empty and *Complete* becomes available again.
+- **Confirmed inline, in its own full-width row**, naming the task and stating three things: the block will be recorded as **skipped**, there is **no undo**, and — if it is the last frame — that the stack becomes empty. Whether *Complete* becomes available with it depends on whether a task is running: it does when one is, and does not while paused, where nothing is active to complete. The confirmation says which.
 - On success the frame disappears from **Now** and the block appears in **Earlier** as `Skipped` — the same projection update every other command already triggers, so both windows agree by construction.
 - A rejected dismissal surfaces the domain's own error, untranslated.
 
@@ -209,7 +209,7 @@ Inherits `visual-redesign.md`'s 150–200 ms ease-out for the disclosure itself.
 
 - **Dismissal writes `Skipped`** — ADR 0005, decided. No `Abandoned` value, and this document does not reopen it.
 - **`derived_interruption_status` is the only permitted reading** of interruption state. Reading `interruption_outcome` directly is a bug: absent means *never interrupted* **or** *interrupted and unresolved*, and only the live stack separates them (ADR 0005, risk **R1**).
-- **`Complete` is rejected while the stack is non-empty**, so emptying the stack changes what the user can do next.
+- **`Complete` is rejected while the stack is non-empty, and separately requires an active task** — two preconditions, checked in that order. Emptying the stack clears the first and never the second.
 - **The active block is never a frame's paused block** — a frame's target is always already closed.
 - **Blocks are addressed by stable id** ([ADR 0006](../../decisions/0006-stable-persistent-time-block-identity.md)), which is what makes a frame's reference resolvable across sessions.
 - **No inference.** ADR 0001.
@@ -253,10 +253,11 @@ Inherits `visual-redesign.md`'s 150–200 ms ease-out for the disclosure itself.
 
 - Dismissing a frame sets its paused block's status to `Skipped`, removes exactly that frame, leaves every other frame's order unchanged, and does not change the active task.
 - A frame at any depth can be dismissed, not only the top one.
-- Dismissal is confirmed before anything is written, and the confirmation names the task, states that there is no undo, and — when it is the last frame — states that *Complete* becomes available.
+- Dismissal is confirmed before anything is written, and the confirmation names the task, states that there is no undo, and — when it is the last frame — states that the stack becomes empty, together with whether *Complete* becomes available (it does with a task active, and does not while paused).
 - Cancelling a confirmation writes **no** transition.
 - Dismissing the **root** frame at depth ≥ 2 is confirmed with a statement naming the task that becomes the new *Return to Original* target, and afterwards *Return to Original* resumes exactly that task.
-- After dismissing the last frame, `Complete` is enabled and succeeds, where it was rejected before.
+- After dismissing the last frame **with a task active**, `Complete` is enabled and succeeds, where it was rejected before.
+- After dismissing the last frame **while paused**, the stack is empty and `Complete` is still unavailable — the domain rejects it for the absent active task, not for the stack — and it becomes available only once work is started or continued.
 - A dismissed frame's block appears in "Earlier" as `Skipped` without a manual refresh, in both windows.
 - **`StackError::BlockReferencedByOpenFrame`'s text is true**: every action it names — resume, dismiss — is reachable from the running application. *(This criterion exists because it was false when this document was written.)*
 - Dismissing the frame that blocks a restricted block makes that block reshapeable: its Timeline Editor drag affordance and its History View time fields both become available, with no restart.
