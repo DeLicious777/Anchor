@@ -251,19 +251,11 @@ impl CompactionTrigger {
 fn counts_toward_compaction(payload: &TransitionPayload) -> bool {
     use TransitionPayload::*;
     match payload {
-        Start { .. } | Switch { .. } | Interrupt { .. } | ReturnPrevious | ReturnOriginal | Complete
-        // `DismissFrame` counts, and the line it falls on is worth stating
-        // because it is not the reconstruction/capture split used below.
-        // **A transition counts when it writes an `InterruptionOutcome`.**
-        // `ReturnPrevious` writes `Resumed`, `ReturnOriginal` writes `Resumed`
-        // plus `Skipped`, and dismissal writes the same `Skipped` — all three
-        // settle what became of interrupted work and mutate the live `stack`.
-        // The reconstruction transitions below write no outcome and touch only
-        // closed blocks.
-        | DismissFrame { .. } => true,
+        Start { .. } | Switch { .. } | Interrupt { .. } | ReturnPrevious | ReturnOriginal | Complete => true,
         // Enumerated rather than a catch-all `_ => false`, so adding a
-        // transition forces a decision here instead of silently defaulting.
-        // It did exactly that for the two below, which postdate ADR 0004's list.
+        // transition forces a decision here instead of silently defaulting. It
+        // has done exactly that for every transition below, all of which
+        // postdate ADR 0004's list.
         //
         // `EditIdentity` and `Delete` do **not** count, for the same reason
         // `Rename` does not: they correct an existing record rather than opening
@@ -278,6 +270,17 @@ fn counts_toward_compaction(payload: &TransitionPayload) -> bool {
         // Time Block, but for work that already happened rather than work now
         // starting, and all three are reconstruction — the exception path.
         //
+        // **`DismissFrame` also does not count**, on that same rule. It is a
+        // correction — resolving a frame the user never went back to — not the
+        // capture of new work, and its volume is negligible and self-limiting
+        // in exactly the way `Delete`'s is. *(It was briefly classified as
+        // counting, on a freshly invented "a transition counts when it writes an
+        // `InterruptionOutcome`" rule. That rule is withdrawn: it was a new
+        // classification principle introduced by an implementation commit, when
+        // the criterion ADR 0004 established — does this bound routine capture
+        // growth? — already answers the question and answers it no. Changing how
+        // this function decides is an ADR's business, not a feature branch's.)*
+        //
         // Recorded as a judgment call extending ADR 0004's rule to transitions
         // it could not have listed — not as a literal reading of that list.
         Heartbeat
@@ -287,7 +290,8 @@ fn counts_toward_compaction(payload: &TransitionPayload) -> bool {
         | Delete { .. }
         | Add { .. }
         | Move { .. }
-        | Resize { .. } => false,
+        | Resize { .. }
+        | DismissFrame { .. } => false,
     }
 }
 
@@ -324,6 +328,39 @@ mod tests {
             trigger.record(&payload);
         }
         assert_eq!(trigger.count(), 6, "all six lifecycle transitions count");
+    }
+
+    /// The correction transitions, pinned as a group. Each one postdates ADR
+    /// 0004's list and each was classified by the same rule: it corrects an
+    /// existing record rather than capturing new work, so it must not advance a
+    /// threshold that exists to bound routine capture growth.
+    ///
+    /// `DismissFrame` is here deliberately. It briefly counted, on a rule
+    /// invented in the commit that added it — changing how this function
+    /// decides is an ADR's business, and ADR 0004 stays unchanged.
+    #[test]
+    fn correction_transitions_never_advance_the_trigger() {
+        let mut trigger = CompactionTrigger::default();
+        let id = uuid::Uuid::from_u128(1);
+
+        for payload in [
+            TransitionPayload::EditIdentity { target: id, name: "x".into(), project: None, client: None },
+            TransitionPayload::Delete { target: id },
+            TransitionPayload::Add {
+                name: "x".into(),
+                project: None,
+                client: None,
+                start: Utc::now(),
+                end: Utc::now(),
+            },
+            TransitionPayload::Move { target: id, start: Utc::now() },
+            TransitionPayload::Resize { target: id, start: Utc::now(), end: Utc::now() },
+            TransitionPayload::DismissFrame { target: id },
+        ] {
+            trigger.record(&payload);
+        }
+
+        assert_eq!(trigger.count(), 0, "reconstruction and frame dismissal are the exception path, not capture");
     }
 
     #[test]

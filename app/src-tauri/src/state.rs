@@ -481,15 +481,11 @@ mod tests {
         let path = dir.path().join("log.jsonl");
         let snapshot_path = dir.path().join("snapshot.json");
 
-        // (open frame ids, active id, closed blocks with their outcomes)
-        type Fingerprint = (Vec<uuid::Uuid>, Option<uuid::Uuid>, Vec<(uuid::Uuid, Option<crate::model::InterruptionOutcome>)>);
-        let fingerprint = |s: &AppState| -> Fingerprint {
+        // The whole projection, serialised — the same thing the snapshot
+        // persists, so this compares every field rather than a chosen few.
+        let serialised = |s: &AppState| {
             let inner = s.inner.lock().unwrap();
-            (
-                inner.stack.stack.iter().map(|f| f.paused_time_block_id).collect(),
-                inner.stack.active.as_ref().map(|b| b.id),
-                inner.stack.closed.iter().map(|b| (b.id, b.interruption_outcome)).collect(),
-            )
+            serde_json::to_string(&inner.stack).unwrap()
         };
 
         let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
@@ -497,27 +493,39 @@ mod tests {
         apply_transition(&state, |_| TransitionPayload::Start { name: "root".into(), project: None, client: None }).unwrap();
         apply_transition(&state, |_| named("phone")).unwrap();
         apply_transition(&state, |_| named("colleague")).unwrap();
+        apply_transition(&state, |_| named("walk-up")).unwrap();
 
-        // Dismiss the middle frame — the case a pop-based implementation gets wrong.
-        let middle = {
+        // **Three frames, dismissing index 1** — frames survive on both sides,
+        // so a pop-based implementation cannot pass by accident. An earlier
+        // version of this test used two frames, where the "middle" is the top.
+        let (bottom, middle, top) = {
             let inner = state.inner.lock().unwrap();
-            assert_eq!(inner.stack.stack.len(), 2);
-            inner.stack.stack[1].paused_time_block_id
+            assert_eq!(inner.stack.stack.len(), 3);
+            (
+                inner.stack.stack[0].paused_time_block_id,
+                inner.stack.stack[1].paused_time_block_id,
+                inner.stack.stack[2].paused_time_block_id,
+            )
         };
         apply_transition(&state, move |_| TransitionPayload::DismissFrame { target: middle }).unwrap();
 
-        let live = fingerprint(&state);
-        assert_eq!(live.0.len(), 1, "one frame left, live");
-        assert!(
-            live.2.iter().any(|(id, outcome)| *id == middle && *outcome == Some(crate::model::InterruptionOutcome::Skipped)),
-            "the dismissed block is Skipped, live"
-        );
+        {
+            let inner = state.inner.lock().unwrap();
+            assert_eq!(
+                inner.stack.stack.iter().map(|f| f.paused_time_block_id).collect::<Vec<_>>(),
+                vec![bottom, top],
+                "live: the middle frame went and the survivors kept their order"
+            );
+            let dismissed = inner.stack.closed.iter().find(|b| b.id == middle).unwrap();
+            assert_eq!(dismissed.interruption_outcome, Some(crate::model::InterruptionOutcome::Skipped));
+        }
+        let live = serialised(&state);
         drop(state);
 
         // Path 1: replayed from the log, with no snapshot present.
         assert!(!snapshot_path.exists(), "nothing has compacted yet");
         let (replayed, _) = AppState::init(&path, &snapshot_path).unwrap();
-        assert_eq!(fingerprint(&replayed), live, "replay must reproduce what the live run produced");
+        assert_eq!(serialised(&replayed), live, "replay must reproduce what the live run produced");
 
         // Path 2: snapshot written and the log truncated, then reopened.
         compact_on_shutdown(&replayed);
@@ -527,7 +535,7 @@ mod tests {
 
         let (restored, _) = AppState::init(&path, &snapshot_path).unwrap();
         assert_eq!(
-            fingerprint(&restored),
+            serialised(&restored),
             live,
             "the snapshot must restore the dismissal identically, with the log gone"
         );

@@ -735,32 +735,99 @@ mod tests {
         start(&mut s, "root", 0);
         interrupt(&mut s, "phone", 3600);
         interrupt(&mut s, "colleague", 7200);
-        assert_eq!(s.stack.len(), 2, "root paused by phone, phone paused by colleague");
+        interrupt(&mut s, "walk-up", 10800);
 
-        let root_frame = s.stack[0].paused_time_block_id;
-        let middle_frame = s.stack[1].paused_time_block_id;
+        // **Three frames, and the dismissal target is index 1** — frames on
+        // both sides of it. Two frames would not do: at depth 2 the "middle" is
+        // also the top, so a pop-based implementation passes by accident. That
+        // is exactly what an earlier version of this test did.
+        assert_eq!(s.stack.len(), 3, "root, phone and colleague are all paused; walk-up is active");
+        let bottom = s.stack[0].paused_time_block_id;
+        let middle = s.stack[1].paused_time_block_id;
+        let top = s.stack[2].paused_time_block_id;
         let active_before = s.active.as_ref().unwrap().id;
 
-        s.apply(&TransitionPayload::DismissFrame { target: middle_frame }, t(10800), 9).unwrap();
+        s.apply(&TransitionPayload::DismissFrame { target: middle }, t(14400), 10).unwrap();
 
-        assert_eq!(s.stack.len(), 1);
-        assert_eq!(s.stack[0].paused_time_block_id, root_frame, "the root frame survives, still at the bottom");
+        assert_eq!(
+            s.stack.iter().map(|f| f.paused_time_block_id).collect::<Vec<_>>(),
+            vec![bottom, top],
+            "exactly the middle frame goes, and the survivors keep their order — \
+             a pop would have left [bottom, middle] instead"
+        );
         assert_eq!(
             s.active.as_ref().unwrap().id,
             active_before,
             "dismissal is not a return — the active task is untouched"
         );
 
-        let dismissed = s.closed.iter().find(|b| b.id == middle_frame).unwrap();
+        let dismissed = s.closed.iter().find(|b| b.id == middle).unwrap();
         assert_eq!(dismissed.interruption_outcome, Some(InterruptionOutcome::Skipped));
         assert_eq!(s.derived_status(dismissed), DerivedInterruptionStatus::Skipped);
 
-        let root_block = s.closed.iter().find(|b| b.id == root_frame).unwrap();
+        for survivor in [bottom, top] {
+            let block = s.closed.iter().find(|b| b.id == survivor).unwrap();
+            assert_eq!(
+                s.derived_status(block),
+                DerivedInterruptionStatus::Pending,
+                "a surviving frame's block is untouched and still owes an outcome"
+            );
+        }
+    }
+
+    /// Dismissal is the remedy for the identity-only tier, and that loop must
+    /// actually close: a block blocked from reshaping becomes reshapeable the
+    /// moment its frame is resolved, with nothing else required.
+    ///
+    /// This is what `StackError::BlockReferencedByOpenFrame` promises when it
+    /// says "resume or dismiss that interruption first".
+    #[test]
+    fn dismissing_a_frame_immediately_unblocks_resize_and_delete_on_its_block() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "root", 0);
+        interrupt(&mut s, "phone", 3600);
+        let blocked = s.stack[0].paused_time_block_id;
+
         assert_eq!(
-            s.derived_status(root_block),
-            DerivedInterruptionStatus::Pending,
-            "the surviving frame's block is untouched and still owes an outcome"
+            s.apply(&TransitionPayload::Resize { target: blocked, start: t(0), end: t(1800) }, t(46800), 9),
+            Err(StackError::BlockReferencedByOpenFrame(blocked)),
+            "restricted while the frame is open"
         );
+
+        s.apply(&TransitionPayload::DismissFrame { target: blocked }, t(46800), 10).unwrap();
+
+        s.apply(&TransitionPayload::Resize { target: blocked, start: t(0), end: t(1800) }, t(46800), 11)
+            .expect("resize is permitted the moment the frame is gone");
+        assert_eq!(s.closed.iter().find(|b| b.id == blocked).unwrap().end, Some(t(1800)));
+
+        s.apply(&TransitionPayload::Delete { target: blocked }, t(46800), 12)
+            .expect("and so is delete");
+        assert!(s.closed.iter().all(|b| b.id != blocked));
+    }
+
+    /// Dismissing the last frame empties the stack, which is what makes
+    /// `Complete` legal again — the hole Pause exists to close, reachable here
+    /// too. Asserted with a task still running, since `Complete` needs one.
+    #[test]
+    fn dismissing_the_last_frame_lets_complete_succeed() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "root", 0);
+        interrupt(&mut s, "phone", 3600);
+        let only_frame = s.stack[0].paused_time_block_id;
+
+        assert_eq!(
+            s.apply(&TransitionPayload::Complete, t(7200), 9),
+            Err(StackError::CannotCompleteWithOpenStack),
+            "an open frame blocks Complete however brief"
+        );
+
+        s.apply(&TransitionPayload::DismissFrame { target: only_frame }, t(7200), 10).unwrap();
+        assert!(s.stack.is_empty());
+        assert!(s.active.is_some(), "dismissal did not touch the running task");
+
+        s.apply(&TransitionPayload::Complete, t(10800), 11)
+            .expect("with the stack empty, Complete is legal again");
+        assert!(s.active.is_none());
     }
 
     /// Dismissing the **root** re-points Return to Original, because "original"
@@ -801,16 +868,14 @@ mod tests {
         )
         .unwrap();
 
-        // `TimeBlock` and `StackFrame` derive no `PartialEq`, so the projection
-        // is captured as the facts a dismissal could plausibly damage.
-        let fingerprint = |s: &InterruptionStack| {
-            (
-                s.stack.iter().map(|f| f.paused_time_block_id).collect::<Vec<_>>(),
-                s.active.as_ref().map(|b| b.id),
-                s.closed.iter().map(|b| (b.id, b.interruption_outcome)).collect::<Vec<_>>(),
-            )
-        };
-        let before = fingerprint(&s);
+        // The **whole** projection, serialised. `TimeBlock` and `StackFrame`
+        // derive no `PartialEq`, but `InterruptionStack` is `Serialize` — which
+        // is what the snapshot persists — so this compares every field rather
+        // than a hand-picked few. An earlier version compared three extracted
+        // fields and still called the result byte-identical; it was not, and a
+        // mutation to any other field would have passed.
+        let serialised = |s: &InterruptionStack| serde_json::to_string(s).unwrap();
+        let before = serialised(&s);
 
         let unknown = Uuid::from_u128(0xdead_beef);
         assert_eq!(
@@ -828,7 +893,11 @@ mod tests {
             "a closed block with no open frame is not dismissable"
         );
 
-        assert_eq!(fingerprint(&s), before, "a rejected dismissal must leave the projection untouched");
+        assert_eq!(
+            serialised(&s),
+            before,
+            "a rejected dismissal must leave the serialised projection byte-identical"
+        );
     }
 
     /// Dismissal writes the *same* value Return to Original writes for the
