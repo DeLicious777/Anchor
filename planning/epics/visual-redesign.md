@@ -35,6 +35,7 @@ The dashboard and widget get a coherent visual system and an information archite
 ## Child issues
 
 - #20 — already correctly titled; blocked on the assets, and the only M3 epic with no unblocked slice.
+- **#26 — replace scaffold identity** (webview title, favicon, bundle icons, `productName`). Also asset-blocked, and **not** in M3a. `identifier: "com.erich.app"` is explicitly out of its scope: it drives `app_data_dir`, so changing it would orphan `transitions.jsonl` and `snapshot.json`.
 
 ## Exit criteria
 
