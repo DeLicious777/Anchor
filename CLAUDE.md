@@ -4,7 +4,13 @@ Complements `~/.claude/CLAUDE.md` (global rules). Only project-specific behavior
 
 ## Current phase
 
-This repository is in **bootstrap/discovery**. There is no finalized idea, architecture, tech stack, or roadmap yet, and **no application code exists**. Global rules about lock files, dependencies, functional-programming style, etc. do not yet apply to anything — they'll matter once implementation starts.
+**Implementation is underway.** A working Windows desktop app exists — Tauri + Rust backend, Svelte/TypeScript frontend, 161 passing tests — with the capture loop (Switch/Interrupt/Return/Complete, hotkeys, mini widget), Task Templates, XLSX/JSON export and the History View built, and timeline reconstruction complete in the domain — all five transitions and commands ship, though Add and Move still have no UI. All eight feature docs and seven ADRs are `accepted`, and **M3 — Editable Timeline** is planned in `planning/milestones.md`.
+
+Global rules about lock files, dependencies, functional-programming style, testing and error handling therefore **apply in full**. They are no longer hypothetical.
+
+**The phase gate below still binds, and it binds per *feature*, not per repository.** A feature that has not cleared Design gets no architecture decisions and no code, however much is already built around it. Most current work is M3 implementation against designs that have cleared it.
+
+*(Corrected 2026-08-07. This said the repository was "in bootstrap/discovery" with "no application code exists" — accurate when written, never updated once the code landed, and carried in both this file and its counterpart. It is `docs/risks.md` **R11** in the instruction files themselves, and the most upstream instance found so far: an agent that believed it would refuse to touch code that has been shipping for weeks.)*
 
 ## The team
 
