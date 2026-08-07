@@ -738,9 +738,9 @@ mod tests {
         interrupt(&mut s, "walk-up", 10800);
 
         // **Three frames, and the dismissal target is index 1** — frames on
-        // both sides of it. Two frames would not do: at depth 2 the "middle" is
-        // also the top, so a pop-based implementation passes by accident. That
-        // is exactly what an earlier version of this test did.
+        // both sides of it. Three is the minimum that proves non-top removal:
+        // at depth 2 the "middle" is also the top, so a pop-based
+        // implementation satisfies the assertion without removing by id.
         assert_eq!(s.stack.len(), 3, "root, phone and colleague are all paused; walk-up is active");
         let bottom = s.stack[0].paused_time_block_id;
         let middle = s.stack[1].paused_time_block_id;
@@ -870,10 +870,9 @@ mod tests {
 
         // The **whole** projection, serialised. `TimeBlock` and `StackFrame`
         // derive no `PartialEq`, but `InterruptionStack` is `Serialize` — which
-        // is what the snapshot persists — so this compares every field rather
-        // than a hand-picked few. An earlier version compared three extracted
-        // fields and still called the result byte-identical; it was not, and a
-        // mutation to any other field would have passed.
+        // is what the snapshot persists — so comparing the serialised form
+        // proves complete projection equality. A comparison of selected fields
+        // would leave every unselected field free to change.
         let serialised = |s: &InterruptionStack| serde_json::to_string(s).unwrap();
         let before = serialised(&s);
 

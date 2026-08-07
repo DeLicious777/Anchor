@@ -273,13 +273,12 @@ fn counts_toward_compaction(payload: &TransitionPayload) -> bool {
         // **`DismissFrame` also does not count**, on that same rule. It is a
         // correction — resolving a frame the user never went back to — not the
         // capture of new work, and its volume is negligible and self-limiting
-        // in exactly the way `Delete`'s is. *(It was briefly classified as
-        // counting, on a freshly invented "a transition counts when it writes an
-        // `InterruptionOutcome`" rule. That rule is withdrawn: it was a new
-        // classification principle introduced by an implementation commit, when
-        // the criterion ADR 0004 established — does this bound routine capture
-        // growth? — already answers the question and answers it no. Changing how
-        // this function decides is an ADR's business, not a feature branch's.)*
+        // in exactly the way `Delete`'s is.
+        //
+        // ADR 0004's counting set is the six lifecycle transitions above and
+        // nothing else. What may be added to it is that ADR's business, not an
+        // implementation's: the test here is whether a transition bounds routine
+        // capture growth, never whether it resembles one that counts.
         //
         // Recorded as a judgment call extending ADR 0004's rule to transitions
         // it could not have listed — not as a literal reading of that list.
@@ -335,9 +334,9 @@ mod tests {
     /// existing record rather than capturing new work, so it must not advance a
     /// threshold that exists to bound routine capture growth.
     ///
-    /// `DismissFrame` is here deliberately. It briefly counted, on a rule
-    /// invented in the commit that added it — changing how this function
-    /// decides is an ADR's business, and ADR 0004 stays unchanged.
+    /// `DismissFrame` belongs to this group: it resolves a frame rather than
+    /// capturing work, and ADR 0004's counting set is the six lifecycle
+    /// transitions and nothing else.
     #[test]
     fn correction_transitions_never_advance_the_trigger() {
         let mut trigger = CompactionTrigger::default();

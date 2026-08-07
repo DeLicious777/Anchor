@@ -482,7 +482,8 @@ mod tests {
         let snapshot_path = dir.path().join("snapshot.json");
 
         // The whole projection, serialised — the same thing the snapshot
-        // persists, so this compares every field rather than a chosen few.
+        // persists, so comparing the serialised form proves complete projection
+        // equality across all three paths rather than for selected fields.
         let serialised = |s: &AppState| {
             let inner = s.inner.lock().unwrap();
             serde_json::to_string(&inner.stack).unwrap()
@@ -495,9 +496,9 @@ mod tests {
         apply_transition(&state, |_| named("colleague")).unwrap();
         apply_transition(&state, |_| named("walk-up")).unwrap();
 
-        // **Three frames, dismissing index 1** — frames survive on both sides,
-        // so a pop-based implementation cannot pass by accident. An earlier
-        // version of this test used two frames, where the "middle" is the top.
+        // **Three frames, dismissing index 1** — frames survive on both sides.
+        // Three is the minimum that proves non-top removal: at depth 2 the
+        // "middle" is also the top, and a pop satisfies the assertion.
         let (bottom, middle, top) = {
             let inner = state.inner.lock().unwrap();
             assert_eq!(inner.stack.stack.len(), 3);
