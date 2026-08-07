@@ -22,20 +22,20 @@ The interruption stack becomes inspectable and resolvable: progressive disclosur
 
 ## Remaining work
 
-1. ~~A frame-dismissal transition and command.~~ **Done in #24** (2026-08-07) — resolves the named frame's block to `Skipped` through the same `resolve_paused` path the returns use, removes that frame, leaves `active` untouched, keyed on the paused block's id. Ships no behaviour on its own.
+1. ~~A frame-dismissal transition and command.~~ **Done in #24** (2026-08-07) — resolves the named frame's block to `Skipped` through the same `resolve_paused` path the returns use, removes that frame, leaves `active` untouched, keyed on the paused block's id. Ships no **user-reachable** behaviour on its own.
 2. Replace the always-visible list with a labelled disclosure carrying depth. *(Asset-blocked.)*
 3. "Now" — frames deepest-first, paused-at and waiting-for times, the return preview, per-frame Dismiss with inline confirmation. *(Asset-blocked.)*
 4. "Earlier" — flat, most-recent-first, membership by `start`. **Depends on the shared view range.**
 
 ## Dependencies and blockers
 
-- **Item 1 landed in #24 and ships no behaviour** — it is an *enabling* slice. Until item 3 gives it an entry point, dismissal is a command with no caller, so `BlockReferencedByOpenFrame`'s advice stays false and **this epic does not close on item 1**. *(Recorded 2026-08-07: an earlier draft of this epic claimed item 1 would make that message true. It does not, and shipping item 1 has now demonstrated that.)*
+- **Item 1 landed in #24 and ships no user-reachable behaviour** — it is an *enabling* slice. Until item 3 gives it an entry point, dismissal is a command with no caller, so `BlockReferencedByOpenFrame`'s advice stays false and **this epic does not close on item 1**. *(Recorded 2026-08-07: an earlier draft of this epic claimed item 1 would make that message true. It does not, and shipping item 1 has now demonstrated that.)*
 - Items 2–3: external — the design-system assets.
 - Item 4: implementation dependency — the shared view range, in the Timeline Editor epic.
 
 ## Child issues
 
-- **#24 — frame dismissal, transition and command. Implemented 2026-08-07**; item 1 above. An enabling slice: it closes no acceptance criterion of this feature, because none of them can be met without a caller.
+- **#24 — frame dismissal, transition and command. Implemented 2026-08-07**; item 1 above. **What it does satisfy:** the replay-and-snapshot durability criterion, and the *domain* portions of exact-frame dismissal and order preservation — a dismissal resolves precisely the named frame as `Skipped`, leaves the remaining frames' order intact, leaves `active` untouched, and survives replay and a snapshot round-trip identically. **What it does not:** any user-facing exit criterion, all of which require a caller. It therefore closes neither this epic nor the feature.
 - #25 — the shared view range, which item 4 depends on.
 - #17 — the epic issue, retitled 2026-08-07. Retains the asset-blocked panel work.
 
@@ -45,4 +45,4 @@ The interruption stack becomes inspectable and resolvable: progressive disclosur
 
 ## Can it progress without the design-system assets?
 
-**Partly — item 1 only.** The panel itself cannot.
+**No — not any longer.** Item 1 was this epic's only asset-independent work and it landed in #24 (2026-08-07). Items 2 and 3 are the panel itself and wait on the design-system assets; item 4 waits on those **and additionally** on the shared view range (#25, Timeline Editor epic), so it is the one piece with two separate blockers.
