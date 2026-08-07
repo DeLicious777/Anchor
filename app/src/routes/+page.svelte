@@ -10,6 +10,7 @@
     completeTask,
     renameActive,
     editIdentity,
+    resizeBlock,
     deleteBlock,
     getState,
     onStateChanged,
@@ -27,7 +28,7 @@
     updateHotkeyBindings,
   } from "$lib/api";
   import type { StackView, TimeBlock, ClosedBlock, TaskTemplate, ExportSettings, HotkeyBindings } from "$lib/types";
-  import { formatElapsed } from "$lib/time";
+  import { formatElapsed, toLocalInputValue, fromLocalInputValue } from "$lib/time";
 
   let name = $state("");
   let project = $state("");
@@ -37,39 +38,115 @@
   let view = $state<StackView>({ active: null, stack: [], closed: [] });
 
   // --- History View row actions (timeline-reconstruction.md) ----------------
-  // Edit Identity and Delete are row-level, so they live here rather than on
-  // the Timeline Editor (#14), which owns direct manipulation: Add/Move/Resize.
+  // Edit Identity, Resize and Delete are row-level, so they live here rather
+  // than on the Timeline Editor (#14), which owns the same corrections as
+  // direct manipulation — dragging a boundary instead of typing a time.
   //
-  // Both are thin: this collects input and calls the command. Every rule — the
-  // block must exist, must not be the active one, and must not have an
-  // unresolved interruption pointing at it — is enforced by the domain, and its
-  // error is surfaced verbatim. Duplicating those checks here would let the UI
-  // and replay drift apart.
+  // Resize is typed here because risk R9 must not wait on that surface: until
+  // some route can correct a `system-inferred` end, a wrong inferred end is
+  // uncorrectable, and R4 depends on this one being reachable. Add and Move
+  // remain the Timeline Editor's, having no sensible tabular form.
+  //
+  // All three are thin: this collects input and calls the command. Every rule —
+  // the block must exist, must not be the active one, must not have an
+  // unresolved interruption pointing at it, must not overlap, must not end in
+  // the future — is enforced by the domain, and its error is surfaced verbatim.
+  // Duplicating those checks here would let the UI and replay drift apart.
   let editingId = $state<string | null>(null);
+  // The block as it stood when editing opened. Kept whole so a save can send an
+  // untouched boundary back verbatim rather than round-tripped through the
+  // input, which drops sub-second precision and would record a span change the
+  // user never made.
+  let editOriginal = $state<ClosedBlock | null>(null);
   let editName = $state("");
   let editProject = $state("");
   let editClient = $state("");
+  let editStart = $state("");
+  let editEnd = $state("");
   // Deleting a Time Block destroys a billing record and MVP has no undo, so it
   // is confirmed — the persona rule reserves confirmations for exactly this.
   let pendingDeleteId = $state<string | null>(null);
 
   function beginEdit(block: ClosedBlock) {
     editingId = block.id;
+    editOriginal = block;
     editName = block.name;
     editProject = block.project ?? "";
     editClient = block.client ?? "";
+    editStart = inputValue(block.start);
+    editEnd = inputValue(block.end);
     error = null;
+  }
+
+  /** A closed block always has an end; the shared `TimeBlock` type allows null. */
+  function inputValue(instant: string | null): string {
+    return instant ? toLocalInputValue(instant) : "";
+  }
+
+  /**
+   * Whether this block's span is fixed — `timeline-reconstruction.md`'s
+   * identity-only tier. Read straight off the backend's canonical projection,
+   * never recomputed from the stack, so the affordance cannot drift from the
+   * rule the domain actually enforces. The active block is not a case here: it
+   * never appears among the closed blocks this table renders.
+   */
+  function spanLocked(block: ClosedBlock): boolean {
+    return block.derived_interruption_status === "pending";
   }
 
   function cancelEdit() {
     editingId = null;
+    editOriginal = null;
   }
 
+  /**
+   * Saves whatever the user actually changed, as one or two transitions.
+   *
+   * **Times go first.** `resize_block` is the call the domain can refuse — an
+   * overlap, an end in the future, a block an unresolved interruption still
+   * points at — so attempting it before the identity edit means a rejected
+   * correction leaves the block completely untouched instead of half-saved
+   * under a new name. The reverse order has no such guarantee, and the
+   * asymmetry is real rather than a coin flip: `EditIdentity`'s preconditions
+   * (block exists, is not active) are a strict subset of `Resize`'s, so an
+   * identity edit cannot fail once a resize on the same block has succeeded.
+   *
+   * **Each half is skipped when nothing in it changed.** Both are recorded
+   * facts, and both mark the block's capture origin adjusted, so issuing either
+   * for an untouched field would write a correction into the log that never
+   * happened.
+   */
   async function saveEdit() {
-    if (!editingId) return;
+    if (!editingId || !editOriginal) return;
+    const target = editingId;
+    const original = editOriginal;
+
+    // Compared in input format, not as instants: the field carries seconds
+    // while the stored value carries more, so comparing the parsed instants
+    // would report every untouched span as edited.
+    const startEdited = editStart !== inputValue(original.start);
+    const endEdited = editEnd !== inputValue(original.end);
+    const identityEdited =
+      editName !== original.name ||
+      nullable(editProject) !== original.project ||
+      nullable(editClient) !== original.client;
+
     try {
-      view = await editIdentity(editingId, editName, nullable(editProject), nullable(editClient));
-      editingId = null;
+      if (startEdited || endEdited) {
+        // Only the edited boundary is re-derived from its input; the other is
+        // the stored instant itself, to the precision it was recorded at.
+        const start = startEdited ? fromLocalInputValue(editStart) : original.start;
+        const end = endEdited ? fromLocalInputValue(editEnd) : original.end;
+        if (!start || !end) {
+          error = "A Time Block needs both a start and an end time.";
+          return;
+        }
+        view = await resizeBlock(target, start, end);
+      }
+      if (identityEdited) {
+        view = await editIdentity(target, editName, nullable(editProject), nullable(editClient));
+      }
+      cancelEdit();
       error = null;
     } catch (e) {
       error = String(e);
@@ -700,13 +777,49 @@
             {#if editingId === block.id}
               <tr class="edit-row">
                 <td colspan="10">
-                  <!-- Same three fields as Rename, on a block that has already
-                       finished. No client-side validation: the domain rejects an
-                       edit to the active block or an unknown id, and its error is
-                       surfaced above rather than pre-empted here. -->
+                  <!-- The three Rename fields on a block that has already
+                       finished, plus its two boundaries. No client-side
+                       validation: the domain rejects an edit to the active
+                       block, an unknown id, an overlapping span, an end in the
+                       future, and a reshape of a block an unresolved
+                       interruption still points at — each error surfaced above
+                       rather than pre-empted here.
+
+                       `step="1"` is load-bearing, not decoration: a
+                       datetime-local input defaults to minute granularity and
+                       would silently round a correction the user typed to the
+                       second. -->
                   <label>Name <input bind:value={editName} /></label>
                   <label>Project <input bind:value={editProject} /></label>
                   <label>Client <input bind:value={editClient} /></label>
+                  <!-- The tier rule, read from the projection and never
+                       recomputed (`timeline-editor.md` decision 7): a block an
+                       unresolved interruption still points at is identity-only,
+                       so its boundaries are shown but not editable. Offering
+                       them would invite effort into a commit the domain is
+                       certain to refuse with `BlockReferencedByOpenFrame`.
+
+                       `disabled`, not `readonly`: the readonly attribute does
+                       not apply to `datetime-local` and would be silently
+                       ignored. -->
+                  <label>Start <input type="datetime-local" step="1" bind:value={editStart} disabled={spanLocked(block)} /></label>
+                  <label>End <input type="datetime-local" step="1" bind:value={editEnd} disabled={spanLocked(block)} /></label>
+                  {#if spanLocked(block)}
+                    <p class="hint">
+                      An unresolved interruption still points at this block, so its times
+                      are fixed until that interruption is resumed or dismissed. Its name,
+                      project and client can still be corrected.
+                    </p>
+                  {/if}
+                  {#if block.end_determination === "system-inferred" && !spanLocked(block)}
+                    <!-- The R9/R4 path stated where it is acted on: this end was
+                         never observed, and the user is the only one who can say
+                         what it was. -->
+                    <p class="hint">
+                      This end was inferred after a gap, not observed — accurate only to
+                      about a minute. Correcting it records it as exact.
+                    </p>
+                  {/if}
                   <button type="button" onclick={saveEdit}>Save</button>
                   <button type="button" onclick={cancelEdit}>Cancel</button>
                 </td>

@@ -4,7 +4,7 @@ A manual end-to-end pass over the **running application**. Not a substitute for 
 
 ## Why this exists
 
-The test suite is strong (147 tests) and covers each layer well. But almost every serious defect this project has found was **not** a logic bug inside a layer. It was an assumption **between** layers, and every one of them was found by someone exercising the thing rather than by a test:
+The test suite is strong (149 tests as of 2026-08-06) and covers each layer well. But almost every serious defect this project has found was **not** a logic bug inside a layer. It was an assumption **between** layers, and every one of them was found by someone exercising the thing rather than by a test:
 
 | Defect | Where it hid |
 |---|---|
@@ -15,6 +15,7 @@ The test suite is strong (147 tests) and covers each layer well. But almost ever
 | Theme persistence naming a `settings.json` path that does not exist | document ↔ code |
 | The dashboard described as having gap correction it never had | document ↔ code |
 | The page scrolling sideways at the app's own default window size | domain ↔ UI |
+| A 622 ms task billed as **0** on a real exported sheet | accepted spec ↔ implementation |
 
 That is `docs/principles.md` **#8** and risk **R11** in practice: *verify a claim against documentation **and** implementation before it becomes load-bearing.* Automated tests assert what we thought to assert. This pass exists to surface what we did not.
 
@@ -61,11 +62,20 @@ Watch: **no gap event at all** — the task is simply still running, with no clo
 **5. Edit Identity on a finished block.** Change name, project and client.
 Watch: `Capture` moves to an `*-adjusted` variant but keeps its origin — a `live-capture` block becomes `live-capture-adjusted`, never `manual-entry`. Start, end and interruption status are unchanged.
 
+**5b. Correct the inferred end that step 4 left behind.** Open that block's Edit row and set **End** to the time you actually stopped working.
+Seam: UI → `resize_block` → domain → projection. This is **R9**'s mechanism, which existed as a command from 2026-08-02 but had **no caller anywhere in the frontend** until 2026-08-06 — so this step exercises a path that has never been exercised before.
+Watch: `End source` flips from **inferred** to **exact**, the duration updates, the italic styling stops, and `Capture` becomes `live-capture-adjusted`.
+Watch: **Start does not move.** A start that shifts by up to a minute means the untouched boundary was re-sent at the input's one-second precision instead of its stored value — harmless-looking, and against an abutting predecessor it turns a legal edit into a rejection for a reason nothing on screen explains.
+Watch: an end **before** the start, **in the future**, or overlapping the neighbouring block is **rejected** in the domain's own wording, and nothing is written to the log.
+Watch: correcting the end **back** to what Anchor originally inferred leaves `End source` = **exact**, *not* inferred. Only `RecoverGap` ever writes an inferred end, and the user really did choose that instant the second time. *(`timeline-reconstruction.md` asserted the opposite until 2026-08-06 and was corrected against the code — reverting would need the original inferred instant kept somewhere, and nothing stores it.)*
+Watch: editing **only the Start** and leaving End alone keeps `End source` = **inferred**. This is the case that genuinely matters, and it is the one the retracted criterion above was reaching for: a start-only correction must never claim the user fixed an end they did not touch.
+
 **6. Edit Identity on a block whose interruption is still unresolved**, then return to it.
 Seam: block ↔ stack frame atomicity.
 Watch: the resumed task carries the **corrected** identity. A stale name here means the frame's copy desynced, and no later transition would ever fix it.
 
 **7. Try to Delete that same unresolved block.**
+Watch: its **Start and End fields are disabled** in the Edit row while name/project/client stay editable — the identity-only tier stated *before* effort is spent, not after a rejection. Editable time fields here would let the user type a correction the domain is certain to refuse with `BlockReferencedByOpenFrame`.
 Watch: it is **rejected**, with the backend's own wording. The block stays, the frame stays, and the app keeps working. This is what stops replay from later failing with `PausedBlockNotFound`.
 
 **8. Delete a resolved block. Read the confirmation, then cancel.**
@@ -84,6 +94,8 @@ Watch: it does **not** reuse a number already used today — including the numbe
 Seam: projection → export → billing artifact.
 Watch: the deleted block is **absent from both**. Edited names appear in their corrected form. Durations match what the History View shows. Full-fidelity JSON is ordered by **start**, not by when blocks were closed.
 Watch: exporting writes nothing — `transitions.jsonl` is no longer than before, apart from any heartbeat that legitimately landed during it.
+Watch: **no row reads 0** with rounding enabled. Every task that ran at all bills at least one interval. A `0` means a duration was truncated to nothing before the rounding's zero-check saw it — the 2026-08-06 defect, which billed 45 minutes where 60 was owed and was found only by reading a real sheet.
+Watch: cross-check one task against the rounding-off JSON. XLSX totals must equal the ceiling of the **exact** summed durations, not of their per-block truncated seconds — the two differ only on a fragmented day, which is the day it matters on.
 
 ### Persistence
 

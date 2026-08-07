@@ -45,52 +45,88 @@ pub fn blocks_in_range(
 }
 
 /// Groups by (name, project, client), summing durations. First-seen order.
-pub fn group(blocks: &[TimeBlock]) -> Vec<ExportRow> {
-    let mut rows: Vec<ExportRow> = Vec::new();
+///
+/// Sums in **milliseconds**, and every caller converts to seconds exactly once
+/// at the end. Truncating each block to whole seconds before summing — which
+/// this did until 2026-08-06 — violates `export.md`'s explicit "first sum then
+/// round" rule and loses up to a second *per block*, so it under-reports in
+/// proportion to how fragmented the day was. Ten 900 ms blocks of one task are
+/// nine seconds of work and summed to zero.
+fn grouped_millis(blocks: &[TimeBlock]) -> Vec<(ExportRow, i64)> {
+    let mut rows: Vec<(ExportRow, i64)> = Vec::new();
 
     for block in blocks {
         let Some(duration) = block.duration() else {
             continue;
         };
-        let seconds = duration.num_seconds();
+        let millis = duration.num_milliseconds();
 
         match rows
             .iter_mut()
-            .find(|r| r.name == block.name && r.project == block.project && r.client == block.client)
+            .find(|(r, _)| r.name == block.name && r.project == block.project && r.client == block.client)
         {
-            Some(row) => row.duration_seconds += seconds,
-            None => rows.push(ExportRow {
-                name: block.name.clone(),
-                project: block.project.clone(),
-                client: block.client.clone(),
-                duration_seconds: seconds,
-            }),
+            Some((_, total)) => *total += millis,
+            None => rows.push((
+                ExportRow {
+                    name: block.name.clone(),
+                    project: block.project.clone(),
+                    client: block.client.clone(),
+                    duration_seconds: 0,
+                },
+                millis,
+            )),
         }
     }
 
     rows
 }
 
-/// Ceiling rounding to the next multiple of `interval_minutes`. A zero duration
-/// stays zero — there's nothing to round up from "no work done".
-pub fn round_up_seconds(total_seconds: i64, interval_minutes: u32) -> i64 {
-    if total_seconds == 0 {
+/// The unrounded grouping: exact per-task totals, truncated to whole seconds
+/// only after summing.
+pub fn group(blocks: &[TimeBlock]) -> Vec<ExportRow> {
+    grouped_millis(blocks)
+        .into_iter()
+        .map(|(mut row, millis)| {
+            row.duration_seconds = millis / 1000;
+            row
+        })
+        .collect()
+}
+
+/// Ceiling rounding to the next multiple of `interval_minutes`, returning whole
+/// seconds. Only a total of **exactly zero** stays zero — there is nothing to
+/// round up from "no work done".
+///
+/// Takes milliseconds rather than seconds so that work shorter than a second is
+/// still work. It took seconds until 2026-08-06, and a 622 ms Time Block
+/// therefore arrived here already truncated to `0`, tripped the zero guard, and
+/// was billed as nothing — against `export.md`'s ceiling rule, which promises
+/// that one minute at a 15-minute interval becomes 15 minutes and states no
+/// sub-second exception. The guard was correct; what reached it was not.
+pub fn round_up_millis(total_millis: i64, interval_minutes: u32) -> i64 {
+    if total_millis <= 0 {
         return 0;
     }
     let interval_seconds = i64::from(interval_minutes) * 60;
-    let intervals = (total_seconds + interval_seconds - 1) / interval_seconds;
+    let interval_millis = interval_seconds * 1000;
+    let intervals = (total_millis + interval_millis - 1) / interval_millis;
+
     intervals * interval_seconds
 }
 
 /// Always grouped; each row's total is rounded if `rounding_interval` is Some.
 pub fn xlsx_rows(blocks: &[TimeBlock], rounding_interval: Option<u32>) -> Vec<ExportRow> {
-    let mut rows = group(blocks);
-    if let Some(interval) = rounding_interval {
-        for row in &mut rows {
-            row.duration_seconds = round_up_seconds(row.duration_seconds, interval);
-        }
-    }
-    rows
+    let Some(interval) = rounding_interval else {
+        return group(blocks);
+    };
+
+    grouped_millis(blocks)
+        .into_iter()
+        .map(|(mut row, millis)| {
+            row.duration_seconds = round_up_millis(millis, interval);
+            row
+        })
+        .collect()
 }
 
 /// JSON's shape depends on whether rounding is enabled for this export — see
@@ -176,8 +212,80 @@ mod tests {
 
     #[test]
     fn rounding_ceils_1_minute_to_15_and_16_minutes_to_30_at_15_minute_interval() {
-        assert_eq!(round_up_seconds(60, 15), 15 * 60);
-        assert_eq!(round_up_seconds(16 * 60, 15), 30 * 60);
+        assert_eq!(round_up_millis(60 * 1000, 15), 15 * 60);
+        assert_eq!(round_up_millis(16 * 60 * 1000, 15), 30 * 60);
+    }
+
+    /// Regression, from a real export on 2026-08-06: a 622 ms Time Block was
+    /// billed as **0 minutes** at a 15-minute interval, because durations were
+    /// truncated to whole seconds before the zero guard ran. `export.md` states
+    /// ceiling rounding with no sub-second exception, so this silently
+    /// under-reported — a wrong billed total, which is `docs/risks.md` **R2**.
+    #[test]
+    fn a_sub_second_block_still_bills_one_whole_interval() {
+        let mut block = closed_block("Anchor 3", None, 0, 0);
+        block.end = Some(t(0) + chrono::Duration::milliseconds(622));
+
+        assert_eq!(round_up_millis(622, 15), 15 * 60, "622 ms is work, and work rounds up");
+        assert_eq!(xlsx_rows(&[block], Some(15))[0].duration_seconds, 15 * 60);
+    }
+
+    /// The other half of the same defect, and the one a fragmented day makes
+    /// worse: `export.md` requires "first sum then round", so the sum must be
+    /// over exact durations. Truncating each block first loses up to a second
+    /// per block — here nine seconds of real work summed to nothing.
+    #[test]
+    fn many_sub_second_blocks_of_one_task_sum_before_they_are_truncated() {
+        let blocks: Vec<TimeBlock> = (0..10)
+            .map(|i| {
+                let mut b = closed_block("Anchor 1", None, i, 0);
+                b.end = Some(t(i) + chrono::Duration::milliseconds(900));
+                b
+            })
+            .collect();
+
+        assert_eq!(group(&blocks)[0].duration_seconds, 9, "10 x 900ms is 9 seconds, not 0");
+        assert_eq!(xlsx_rows(&blocks, Some(15))[0].duration_seconds, 15 * 60);
+    }
+
+    /// The zero guard itself was never wrong, and must survive the fix: a block
+    /// with no elapsed time is not work, and nothing rounds up from it.
+    #[test]
+    fn a_genuinely_zero_duration_block_still_bills_nothing() {
+        let block = closed_block("Anchor 9", None, 0, 0);
+
+        assert_eq!(block.duration().unwrap().num_milliseconds(), 0);
+        assert_eq!(round_up_millis(0, 15), 0);
+        assert_eq!(xlsx_rows(&[block], Some(15))[0].duration_seconds, 0);
+    }
+
+    /// The exact five blocks of the 2026-08-06 export that exposed this. It
+    /// billed 45 minutes; every one of these is real work, so it is 60.
+    #[test]
+    fn the_2026_08_06_export_bills_every_task_that_ran() {
+        let ms = |start: i64, dur: i64| (start, dur);
+        let spec = [
+            ("Anchor 1", ms(0, 12630)),
+            ("Anchor 2", ms(12630, 2500)),
+            ("Anchor 3", ms(15130, 622)),
+            ("Anchor 4", ms(15752, 2106)),
+            ("Anchor 1", ms(17858, 836)),
+        ];
+        let blocks: Vec<TimeBlock> = spec
+            .iter()
+            .map(|(name, (start_ms, dur_ms))| {
+                let mut b = closed_block(name, None, 0, 0);
+                b.start = t(0) + chrono::Duration::milliseconds(*start_ms);
+                b.end = Some(b.start + chrono::Duration::milliseconds(*dur_ms));
+                b
+            })
+            .collect();
+
+        let rows = xlsx_rows(&blocks, Some(15));
+        let minutes: Vec<i64> = rows.iter().map(|r| r.duration_seconds / 60).collect();
+
+        assert_eq!(minutes, vec![15, 15, 15, 15], "Anchor 3 ran for 622ms and was billed 0");
+        assert_eq!(minutes.iter().sum::<i64>(), 60);
     }
 
     #[test]
