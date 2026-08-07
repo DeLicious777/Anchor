@@ -91,6 +91,27 @@ pub fn apply_transition(
     let mut inner = state.inner.lock().map_err(|_| "state lock poisoned".to_string())?;
     let payload = build_payload(&inner.stack);
 
+    apply_payload(&mut inner, payload)
+}
+
+/// Append a heartbeat only if a task is still active under the same lock used
+/// for the append. A separate `has_active` peek can race with Pause and write a
+/// stale heartbeat after tracking has stopped. The guard deliberately lives on
+/// this live-write path rather than in `InterruptionStack::apply`: older logs
+/// may contain an idle heartbeat from that race and must remain replayable.
+pub fn apply_heartbeat_if_active(state: &AppState) -> Result<Option<StackView>, String> {
+    let mut inner = state.inner.lock().map_err(|_| "state lock poisoned".to_string())?;
+    if !crate::heartbeat::should_beat(inner.stack.active.is_some()) {
+        return Ok(None);
+    }
+
+    apply_payload(&mut inner, TransitionPayload::Heartbeat).map(Some)
+}
+
+fn apply_payload(
+    inner: &mut crate::state::Inner,
+    payload: TransitionPayload,
+) -> Result<StackView, String> {
     // Dry-run: reject before writing anything durable if this would fail.
     let mut check = inner.stack.clone();
     check
@@ -109,7 +130,7 @@ pub fn apply_transition(
     // action succeeded.
     inner.compaction.record(&record.payload);
     let view = StackView::from(&inner.stack);
-    crate::state::compact_if_due(&mut inner);
+    crate::state::compact_if_due(inner);
 
     Ok(view)
 }
@@ -205,6 +226,16 @@ pub fn interrupt(
         project,
         client,
     })?;
+    emit_state_changed(&app, &view);
+    Ok(view)
+}
+
+/// Stops tracking without discarding the return path. This is deliberately a
+/// backend-only enabling command: the hotkey, display and Continue relabel ship
+/// together in M3c so Pause cannot become live while its state is invisible.
+#[tauri::command]
+pub fn pause(app: AppHandle, state: State<AppState>) -> Result<StackView, String> {
+    let view = apply_transition(&state, |_| TransitionPayload::Pause)?;
     emit_state_changed(&app, &view);
     Ok(view)
 }
@@ -526,6 +557,56 @@ mod tests {
 
     fn log_lines(path: &std::path::Path) -> usize {
         std::fs::read_to_string(path).map(|s| s.lines().count()).unwrap_or(0)
+    }
+
+    #[test]
+    fn pause_appends_once_and_rejected_pause_or_idle_heartbeat_append_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let (state, _) = AppState::init(&path, dir.path().join("snapshot.json")).unwrap();
+
+        apply_transition(&state, |_| TransitionPayload::Start {
+            name: "work".into(),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+
+        let before_pause = log_lines(&path);
+        apply_transition(&state, |_| TransitionPayload::Pause).unwrap();
+        assert_eq!(
+            log_lines(&path),
+            before_pause + 1,
+            "Pause writes exactly one durable transition"
+        );
+
+        let paused_projection = {
+            let inner = state.inner.lock().unwrap();
+            serde_json::to_string(&inner.stack).unwrap()
+        };
+        let paused_lines = log_lines(&path);
+        let error = apply_transition(&state, |_| TransitionPayload::Pause).unwrap_err();
+        assert!(error.contains("no active task"));
+        assert_eq!(
+            log_lines(&path),
+            paused_lines,
+            "a rejected second Pause writes nothing"
+        );
+        assert_eq!(
+            {
+                let inner = state.inner.lock().unwrap();
+                serde_json::to_string(&inner.stack).unwrap()
+            },
+            paused_projection,
+            "the rejected command leaves the full projection unchanged"
+        );
+
+        assert!(apply_heartbeat_if_active(&state).unwrap().is_none());
+        assert_eq!(
+            log_lines(&path),
+            paused_lines,
+            "the live heartbeat path writes nothing once the state is paused"
+        );
     }
 
     /// **The layering invariant: a History View command is a pure adapter over

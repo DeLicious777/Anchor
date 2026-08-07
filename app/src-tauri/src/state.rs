@@ -542,6 +542,104 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_paused_state_survives_replay_and_a_snapshot_round_trip() {
+        use crate::commands::apply_transition;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+        let serialised = |state: &AppState| {
+            let inner = state.inner.lock().unwrap();
+            serde_json::to_string(&inner.stack).unwrap()
+        };
+
+        let (state, _) = AppState::init(&path, &snapshot_path).unwrap();
+        apply_transition(&state, |_| TransitionPayload::Start {
+            name: "root".into(),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+        apply_transition(&state, |_| TransitionPayload::Interrupt {
+            name: "phone".into(),
+            project: None,
+            client: None,
+        })
+        .unwrap();
+        apply_transition(&state, |_| TransitionPayload::Pause).unwrap();
+
+        {
+            let inner = state.inner.lock().unwrap();
+            assert!(inner.stack.active.is_none());
+            assert_eq!(inner.stack.stack.len(), 2, "root plus the paused phone task");
+        }
+        let live = serialised(&state);
+        let lines_before_restart = std::fs::read_to_string(&path).unwrap().lines().count();
+        drop(state);
+
+        let (replayed, report) = AppState::init(&path, &snapshot_path).unwrap();
+        assert!(
+            !report.startup_gap_recovered,
+            "paused state has no active block to recover"
+        );
+        assert_eq!(serialised(&replayed), live);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            lines_before_restart,
+            "restart while paused appends no gap transition"
+        );
+
+        compact_on_shutdown(&replayed);
+        drop(replayed);
+        assert!(snapshot_path.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+
+        let (restored, report) = AppState::init(&path, &snapshot_path).unwrap();
+        assert!(!report.startup_gap_recovered);
+        assert_eq!(
+            serialised(&restored),
+            live,
+            "snapshot restore reproduces the paused projection exactly"
+        );
+    }
+
+    #[test]
+    fn an_old_paused_snapshot_stays_silent_at_any_elapsed_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let snapshot_path = dir.path().join("snapshot.json");
+        let paused_at = Utc::now() - Duration::hours(12);
+
+        let mut stack = InterruptionStack::new();
+        stack
+            .apply(
+                &TransitionPayload::Start { name: "waiting".into(), project: None, client: None },
+                paused_at - Duration::hours(1),
+                0,
+            )
+            .unwrap();
+        stack.apply(&TransitionPayload::Pause, paused_at, 1).unwrap();
+        let expected = serde_json::to_string(&stack).unwrap();
+        Snapshot::new(1, stack, paused_at)
+            .write(&snapshot_path)
+            .unwrap();
+
+        let (state, report) = AppState::init(&path, &snapshot_path).unwrap();
+        assert!(
+            !report.startup_gap_recovered,
+            "elapsed time cannot create a gap when nothing is active"
+        );
+        let inner = state.inner.lock().unwrap();
+        assert_eq!(serde_json::to_string(&inner.stack).unwrap(), expected);
+        assert!(inner.stack.active.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "",
+            "no transition is appended on restart"
+        );
+    }
+
     /// Heartbeats must never drive compaction. ADR 0004 is explicit: a
     /// heads-down day with no manual transitions still writes ~480 heartbeat
     /// lines, and compacting on that volume is not what the trigger is for.
