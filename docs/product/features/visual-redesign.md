@@ -219,6 +219,49 @@ Owned by the ux-designer. This section defines the **system**, not the screens; 
 Owned by technical-architect / senior-software-engineer.
 
 - **The design system is not in this repository, and three decisions depend on it.** Decision 2 names `components/**/*.jsx` and `tokens/colors.css` / `spacing.css` / `typography.css`; the three-font constraint below, C.2's "the design system already ships tokens in this shape," D.2's spacing steps, and the project-hue palette all rest on it. Nothing under this repo root contains any of it, so **none of those claims is currently reproducible by anyone but the author.** *(Raised 2026-08-01.)* **Before implementation begins**, the system's location and version must be recorded here, and the three things this doc needs from it — the spacing scale's steps, the palette and its size, the font weights actually used — copied into this doc so the design survives the artifact moving or changing.
+
+  **Recorded 2026-08-08 — Anchor Design System `1.0.0`.** The system has no repository or package; its durable form is its file tree (`tokens/{colors,typography,spacing}.css`, `styles.css`, `components/{core,forms,navigation,feedback}/*.jsx` + `.d.ts`), which must be vendored into this repo at a path we control and that path recorded here. **The values below satisfy this gate on their own** — they are copied, not referenced, so they survive the artifact moving. Vendoring the tree remains required before implementation, for the component sources; it is not required for the decisions above to be reproducible.
+
+  **Spacing — one scale, named `--space-N` where N is the value ÷ 4** (so the scale skips: there is no `--space-7`).
+
+  | | px |
+  |---|---|
+  | Scale | 4, 8, 12, 16, 20, 24, 32, 40, 48, 64, 80 |
+  | `compact` (widget) | 4, 8, 12 — `--space-1/2/3` |
+  | `comfortable` (dashboard) | 16, 24, 32 — `--space-4/6/8` |
+
+  Radii 8 / 12 / 18 / 24 px plus pill; shadows sm / md / lg plus a focus ring.
+
+  **Project hues — 8**, each a foreground with a paired tint. amber `#c98a1e`/`#f7ecd4` · coral `#d1634a`/`#f9e1da` · teal `#1f7a6c`/`#dcf0ea` · indigo `#3f4f9e`/`#e2e5f5` · moss `#5c7a3a`/`#e7f0da` · plum `#8a4a7a`/`#f2e1ee` · sky `#2f7fa8`/`#dcedf5` · clay `#a85c3a`/`#f3e2d6`. **The collision rule past 8 projects is ours and is not yet decided** — the system does not define one.
+
+  **Font weights actually used — four files.** Familjen Grotesk **600** (display); Hanken Grotesk **400** (body) and **500** (labels); JetBrains Mono **500** (timestamps). Imported-but-unused weights (Familjen 500/700, Hanken 600 and italic) may be dropped from the bundle with no visual loss — which is the concrete answer to **R13**(b).
+
+  **Semantic tokens.** Light and dark are both complete; five light values were corrected against AA contrast before adoption, and every ratio below was recomputed rather than taken on trust.
+
+  | Role | Light | Dark |
+  |---|---|---|
+  | canvas | `#faf8f4` | `#15130f` |
+  | surface | `#ffffff` | `#1f1c16` |
+  | surface-sunken / elevated | `#f2efe9` | `#2a261e` |
+  | hairline | `#e7e1d7` | `#332e25` |
+  | hairline-strong | `#a39075` *(was `#d8d0c2`, 1.53:1)* | `#d8d0c2` |
+  | ink / text-primary | `#1a1712` | `#f5f2ec` |
+  | ink-soft / text-secondary | `#55504a` | `#b3ac9f` |
+  | text-muted | `#746d63` *(was `#8a8377`, 3.75:1)* | `#b3ac9f` |
+  | accent — **fill** | `#2a4373` | `#2a4373` (unchanged; white text on it is 9.77:1 in both) |
+  | accent — **border** | `#2a4373` | `#4a67a0` |
+  | accent — **foreground** | `#2a4373` | `#7d94c9` |
+  | accent-on | `#ffffff` | `#ffffff` |
+  | secondary-accent | `#d13a24` | `#d13a24` (fill only) |
+  | success | `#276846` *(was `#2f7a52`)* | `#4fae7d` |
+  | warning | `#846115` *(was `#c98a1e`, 2.94:1)* | `#dba53d` |
+  | danger | `#993a29` *(was `#b9432f`)* | `#e0705a` |
+  | success/warning/danger tint | `#dcf0e2` / `#f9ecd2` / `#fae0da` | **none — see below** |
+
+  **`accent` is three roles, not one.** It is theme-invariant as a *fill* and must be remapped as a *border* or *foreground*: the light value on the dark surface is **1.74:1**. Reusing the fill value for dark link text or a focus ring is the one mistake this table exists to prevent.
+
+  **Status colour in dark theme has no tint** — see the separate constraint below. The `-100` tints are light-theme only.
+
 - **Fonts must be bundled, not fetched.** The system specifies three families (Familjen Grotesk, Hanken Grotesk, JetBrains Mono); a Tauri desktop app has no guaranteed network. Three families is a real binary-size cost against [ADR 0002](../../decisions/0002-desktop-app-framework-and-platform.md), which chose Tauri partly for size — so **subset the bundled weights to those actually used**, and treat dropping to two families as a live option if the cost proves material. Tracked as `docs/risks.md` **R13**.
 - **~~`csp: null` in `tauri.conf.json` is a scaffold default, not a decision.~~ Fixed 2026-08-08, independently of this redesign, exactly as this note said it should be.** A two-layer policy now ships — `svelte.config.js`'s `csp.mode: "hash"` for the one inline bootstrap script whose hash changes every build, and a header policy in `tauri.conf.json` for everything else. Bundling fonts locally, when it happens, needs no CSP change: `font-src 'self'` already covers it. The original note follows, since its reasoning is what got this done.
 - **`csp: null` in `tauri.conf.json` is a scaffold default, not a decision.** Noted here because the font decision surfaces it — bundling locally removes the main reason to relax CSP — but **this redesign does not own it and it should not wait for it.** It is a live security posture in shipped config, tracked as `docs/risks.md` **R13**, and fixable independently today.
