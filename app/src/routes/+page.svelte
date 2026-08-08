@@ -456,8 +456,18 @@
   // Distinct (name, project, client) combos actually used in the timeline —
   // the "past task" half of the rename picker's "Both" sources, alongside
   // Task Templates. Ramda's uniqBy, not a hand-rolled Set/Map dedup.
+  //
+  // The key is a JSON array rather than delimiter-joined text. A delimiter
+  // has to be a character no field can contain, and the previous choice —
+  // NUL — was correct on that count and made git classify this whole file
+  // as binary: no textual diffs and no line-level merges, on the largest
+  // file in the project. `JSON.stringify` needs no such character, so the
+  // ambiguity it was guarding against cannot arise at all.
+  //
+  // `?? ""` is kept deliberately: it preserves the existing equivalence
+  // classes, where an absent project and an empty one are the same task.
   let historyEntries = $derived(
-    R.uniqBy((b: TimeBlock) => `${b.name} ${b.project ?? ""} ${b.client ?? ""}`, view.closed),
+    R.uniqBy((b: TimeBlock) => JSON.stringify([b.name, b.project ?? "", b.client ?? ""]), view.closed),
   );
 
   // Combined rename suggestions: saved templates and raw task history,

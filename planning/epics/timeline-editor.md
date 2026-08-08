@@ -30,7 +30,7 @@ A proportional graphical timeline beside the History View — supplying the clam
 
 - **External:** the design-system assets — spacing scale steps, hue palette, font weights. Explicitly a prerequisite of *implementing*, never of accepting.
 - **Item 1 landed in #25.** The Interruption History epic's "Earlier" no longer has a backend-range dependency; its surface work remains asset-blocked.
-- `app/src/routes/+page.svelte` is git-binary (NUL bytes in an `R.uniqBy` key), so this work gets no line-level merges.
+- ~~`app/src/routes/+page.svelte` is git-binary~~ — **fixed 2026-08-08**: the `R.uniqBy` key is now `JSON.stringify([...])`, which needs no delimiter at all, so the file is plain text and this work gets ordinary diffs and merges.
 
 ## Child issues
 
