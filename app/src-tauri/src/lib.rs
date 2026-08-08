@@ -12,6 +12,7 @@ pub mod settings;
 pub mod stack;
 pub mod state;
 pub mod templates;
+pub mod view_range;
 
 use export_settings::ExportSettingsState;
 use hotkeys::{HotkeyAction, HotkeyState};
@@ -19,6 +20,7 @@ use settings::HotkeyBindings;
 use state::AppState;
 use tauri::Manager;
 use templates::TemplateState;
+use view_range::ViewRangeState;
 use tauri_plugin_global_shortcut::ShortcutState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -130,6 +132,9 @@ pub fn run() {
             let export_settings_path = paths::export_settings_file_path(handle)?;
             app.manage(ExportSettingsState::init(export_settings_path));
 
+            let view_range_path = paths::view_range_file_path(handle)?;
+            app.manage(ViewRangeState::init(view_range_path));
+
             let heartbeat_handle = handle.clone();
             std::thread::spawn(move || heartbeat::run(heartbeat_handle));
 
@@ -160,6 +165,8 @@ pub fn run() {
             commands::list_templates,
             commands::get_export_settings,
             commands::update_export_settings,
+            commands::get_view_range,
+            commands::set_view_range,
             commands::export_xlsx,
             commands::export_json,
             commands::get_hotkey_bindings,

@@ -34,3 +34,9 @@ pub fn export_settings_file_path(app: &AppHandle) -> Result<PathBuf, Box<dyn std
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join("export_settings.json"))
 }
+
+pub fn view_range_file_path(app: &AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join("view_range.json"))
+}
