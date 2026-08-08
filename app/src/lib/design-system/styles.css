@@ -1,0 +1,6 @@
+@import 'tokens/colors.css';
+@import 'tokens/typography.css';
+@import 'tokens/spacing.css';
+body{background:var(--canvas);color:var(--ink);font:var(--text-body-md)}
+a{color:var(--anchor-500)}
+a:hover{color:var(--anchor-600)}

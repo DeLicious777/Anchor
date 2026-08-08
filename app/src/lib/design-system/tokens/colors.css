@@ -1,0 +1,14 @@
+:root{
+--ink:#1a1712;--ink-soft:#55504a;--muted:#746d63;--faint:#b3ac9f;
+--canvas:#faf8f4;--surface:#ffffff;--surface-sunken:#f2efe9;--hairline:#e7e1d7;--hairline-strong:#a39075;
+--canvas-dark:#15130f;--surface-dark:#1f1c16;--surface-dark-elevated:#2a261e;--hairline-dark:#332e25;--hairline-strong-dark:#d8d0c2;--ink-on-dark:#f5f2ec;--ink-soft-on-dark:#b3ac9f;
+--anchor-700:#16233f;--anchor-600:#1e2f52;--anchor-500:#2a4373;--anchor-400:#4a67a0;--anchor-100:#e4e9f3;
+--accent-border-dark:#4a67a0;--accent-fg-dark:#7d94c9;
+--clay-500:#d13a24;--clay-100:#fbe6da;
+--on-primary:#ffffff;--on-clay:#ffffff;
+--warning:#846115;--warning-100:#f9ecd2;--warning-dark:#dba53d;
+--success:#276846;--success-100:#dcf0e2;--success-dark:#4fae7d;
+--danger:#993a29;--danger-100:#fae0da;--danger-dark:#e0705a;
+--tag-amber:#c98a1e;--tag-coral:#d1634a;--tag-teal:#1f7a6c;--tag-indigo:#3f4f9e;--tag-moss:#5c7a3a;--tag-plum:#8a4a7a;--tag-sky:#2f7fa8;--tag-clay:#a85c3a;
+--tag-amber-bg:#f7ecd4;--tag-coral-bg:#f9e1da;--tag-teal-bg:#dcf0ea;--tag-indigo-bg:#e2e5f5;--tag-moss-bg:#e7f0da;--tag-plum-bg:#f2e1ee;--tag-sky-bg:#dcedf5;--tag-clay-bg:#f3e2d6;
+}
