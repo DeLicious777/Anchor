@@ -154,30 +154,12 @@ impl InterruptionStack {
                 Ok(())
             }
             TransitionPayload::Interrupt { name, project, client } => {
-                let mut current = self.active.take().ok_or(StackError::NoActiveTask)?;
-                current.end = Some(timestamp);
-                // The interrupt fixed this block's end moment, so its END is
-                // user-determined like any other. What stays pending is its
-                // INTERRUPTION OUTCOME — resolved on Return, or on dismissal.
-                // Splitting those apart is the whole point of ADR 0005: the old
-                // single field left this block indistinguishable from one that
-                // was never interrupted.
-                current.end_determination = Some(EndDetermination::UserDetermined);
-                let paused_id = current.id;
-                // The frame must carry the PAUSED task's identity (what to
-                // resume later), not the incoming interrupting task's identity.
-                let frame = StackFrame {
-                    paused_time_block_id: paused_id,
-                    name: current.name.clone(),
-                    project: current.project.clone(),
-                    client: current.client.clone(),
-                };
-                self.closed.push(current);
-                self.stack.push(frame);
+                self.close_active_as_interruption(timestamp)?;
                 self.note_anchor_name(name, timestamp);
                 self.active = Some(TimeBlock::new(name.clone(), project.clone(), client.clone(), timestamp, seq));
                 Ok(())
             }
+            TransitionPayload::Pause => self.close_active_as_interruption(timestamp),
             TransitionPayload::Rename { name, project, client } => {
                 let current = self.active.as_mut().ok_or(StackError::NoActiveTask)?;
                 current.name = name.clone();
@@ -486,6 +468,32 @@ impl InterruptionStack {
             current.end_determination = Some(EndDetermination::UserDetermined);
             self.closed.push(current);
         }
+    }
+
+    /// Close the active block as interrupted and preserve its return path.
+    ///
+    /// Shared by Interrupt and Pause so their frame construction cannot drift:
+    /// Interrupt starts a successor after this returns, while Pause deliberately
+    /// does not. The active-task precondition is checked before any mutation and
+    /// everything after `take` is infallible, which keeps replay atomic too.
+    fn close_active_as_interruption(
+        &mut self,
+        timestamp: DateTime<Utc>,
+    ) -> Result<(), StackError> {
+        let mut current = self.active.take().ok_or(StackError::NoActiveTask)?;
+        current.end = Some(timestamp);
+        // The user fixed the end moment. What stays pending is the interruption
+        // outcome, resolved later by Return or dismissal (ADR 0005).
+        current.end_determination = Some(EndDetermination::UserDetermined);
+        let frame = StackFrame {
+            paused_time_block_id: current.id,
+            name: current.name.clone(),
+            project: current.project.clone(),
+            client: current.client.clone(),
+        };
+        self.closed.push(current);
+        self.stack.push(frame);
+        Ok(())
     }
 
     /// The canonical interruption status for a block — the ONE interpretation
@@ -1414,6 +1422,193 @@ mod tests {
         assert_eq!(s.closed[0].interruption_outcome, None, "outcome pending until returned to or skipped");
         assert_eq!(s.closed[0].end_determination, Some(EndDetermination::UserDetermined), "the interrupt still fixed its end");
         assert_eq!(s.active.as_ref().unwrap().name, "B");
+    }
+
+    #[test]
+    fn pause_closes_the_active_block_pushes_its_frame_and_starts_nothing() {
+        let mut s = InterruptionStack::new();
+        s.apply(
+            &TransitionPayload::Start {
+                name: "A".into(),
+                project: Some("Anchor".into()),
+                client: Some("Client".into()),
+            },
+            t(0),
+            1,
+        )
+        .unwrap();
+        let active_id = s.active.as_ref().unwrap().id;
+        let origin = s.active.as_ref().unwrap().capture_origin.clone();
+
+        s.apply(&TransitionPayload::Pause, t(10), 11).unwrap();
+
+        assert!(s.active.is_none(), "Pause starts no successor");
+        assert_eq!(s.stack_depth(), 1);
+        assert_eq!(s.closed.len(), 1);
+        let paused = &s.closed[0];
+        assert_eq!(paused.id, active_id);
+        assert_eq!(paused.end, Some(t(10)));
+        assert_eq!(
+            paused.end_determination,
+            Some(EndDetermination::UserDetermined)
+        );
+        assert_eq!(
+            paused.capture_origin, origin,
+            "Pause does not rewrite provenance"
+        );
+        assert_eq!(paused.interruption_outcome, None);
+        assert_eq!(
+            s.derived_status(paused),
+            DerivedInterruptionStatus::Pending
+        );
+
+        let frame = s.stack.last().unwrap();
+        assert_eq!(frame.paused_time_block_id, active_id);
+        assert_eq!(frame.name, "A");
+        assert_eq!(frame.project.as_deref(), Some("Anchor"));
+        assert_eq!(frame.client.as_deref(), Some("Client"));
+    }
+
+    #[test]
+    fn pausing_without_an_active_task_is_atomic() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "A", 0);
+        s.apply(&TransitionPayload::Pause, t(10), 11).unwrap();
+        let before = serde_json::to_string(&s).unwrap();
+
+        assert_eq!(
+            s.apply(&TransitionPayload::Pause, t(20), 21),
+            Err(StackError::NoActiveTask)
+        );
+        assert_eq!(
+            serde_json::to_string(&s).unwrap(),
+            before,
+            "a rejected second Pause changes no durable state"
+        );
+    }
+
+    #[test]
+    fn pause_at_depth_n_adds_the_active_task_on_top_and_return_previous_resumes_it() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "root", 0);
+        interrupt(&mut s, "phone", 10);
+        interrupt(&mut s, "colleague", 20);
+        let older_frames = s
+            .stack
+            .iter()
+            .map(|f| f.paused_time_block_id)
+            .collect::<Vec<_>>();
+        let paused_id = s.active.as_ref().unwrap().id;
+
+        s.apply(&TransitionPayload::Pause, t(30), 31).unwrap();
+
+        assert_eq!(s.stack_depth(), 3);
+        assert_eq!(
+            s.stack[..2]
+                .iter()
+                .map(|f| f.paused_time_block_id)
+                .collect::<Vec<_>>(),
+            older_frames,
+            "Pause preserves every older frame and its order"
+        );
+        assert_eq!(
+            s.stack.last().unwrap().paused_time_block_id,
+            paused_id,
+            "the paused task is the new top frame"
+        );
+
+        s.apply(&TransitionPayload::ReturnPrevious, t(40), 41).unwrap();
+        assert_eq!(
+            s.active.as_ref().unwrap().name,
+            "colleague",
+            "no synthetic Start is required before returning"
+        );
+        assert_eq!(s.stack_depth(), 2);
+        let original = s.closed.iter().find(|b| b.id == paused_id).unwrap();
+        assert_eq!(
+            original.interruption_outcome,
+            Some(InterruptionOutcome::Resumed)
+        );
+    }
+
+    #[test]
+    fn return_original_after_pause_resumes_root_and_skips_every_non_root_frame() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "root", 0);
+        interrupt(&mut s, "phone", 10);
+        let root_id = s.stack[0].paused_time_block_id;
+        let paused_id = s.active.as_ref().unwrap().id;
+        s.apply(&TransitionPayload::Pause, t(20), 21).unwrap();
+
+        s.apply(&TransitionPayload::ReturnOriginal, t(30), 31).unwrap();
+
+        assert_eq!(s.active.as_ref().unwrap().name, "root");
+        assert!(s.stack.is_empty());
+        assert_eq!(
+            s.closed
+                .iter()
+                .find(|b| b.id == root_id)
+                .unwrap()
+                .interruption_outcome,
+            Some(InterruptionOutcome::Resumed)
+        );
+        assert_eq!(
+            s.closed
+                .iter()
+                .find(|b| b.id == paused_id)
+                .unwrap()
+                .interruption_outcome,
+            Some(InterruptionOutcome::Skipped),
+            "the just-paused non-root task is one of Return Original's skipped frames"
+        );
+    }
+
+    #[test]
+    fn start_while_paused_preserves_frames_and_resolves_nothing() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "A", 0);
+        let paused_id = s.active.as_ref().unwrap().id;
+        s.apply(&TransitionPayload::Pause, t(10), 11).unwrap();
+
+        s.apply(
+            &TransitionPayload::Start { name: "B".into(), project: None, client: None },
+            t(20),
+            22,
+        )
+        .unwrap();
+        assert_eq!(s.active.as_ref().unwrap().name, "B");
+        assert_eq!(s.stack.len(), 1);
+        assert_eq!(s.stack[0].paused_time_block_id, paused_id);
+        assert_eq!(
+            s.closed
+                .iter()
+                .find(|b| b.id == paused_id)
+                .unwrap()
+                .interruption_outcome,
+            None
+        );
+    }
+
+    #[test]
+    fn complete_stays_rejected_after_every_paused_frame_is_dismissed() {
+        let mut s = InterruptionStack::new();
+        start(&mut s, "A", 0);
+        let paused_id = s.active.as_ref().unwrap().id;
+        s.apply(&TransitionPayload::Pause, t(10), 11).unwrap();
+
+        assert_eq!(
+            s.apply(&TransitionPayload::Complete, t(20), 21),
+            Err(StackError::CannotCompleteWithOpenStack)
+        );
+        s.apply(&TransitionPayload::DismissFrame { target: paused_id }, t(20), 22).unwrap();
+        assert!(s.stack.is_empty());
+        assert!(s.active.is_none());
+
+        assert_eq!(
+            s.apply(&TransitionPayload::Complete, t(30), 31),
+            Err(StackError::NoActiveTask),
+            "emptying the stack clears only Complete's first precondition"
+        );
     }
 
     #[test]

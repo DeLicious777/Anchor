@@ -167,6 +167,31 @@ mod tests {
         assert_eq!(first, second, "identity is a reading of the log, not a fresh value per run");
     }
 
+    /// Older builds could append a heartbeat after tracking stopped because the
+    /// scheduler checked `active` and appended under separate locks. The live
+    /// path now closes that race, but replay must remain permissive for logs
+    /// already written with the old ordering.
+    #[test]
+    fn a_historical_idle_heartbeat_after_pause_still_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("log.jsonl");
+        let mut writer = LogWriter::open(&path, 0).unwrap();
+        writer.append(payload("waiting")).unwrap();
+        writer.append(TransitionPayload::Pause).unwrap();
+
+        let before = replay(&path, None, None).unwrap();
+        let paused_projection = serde_json::to_string(&before.stack).unwrap();
+        let stale_heartbeat = writer.append(TransitionPayload::Heartbeat).unwrap();
+        drop(writer);
+
+        let after = replay(&path, None, None).unwrap();
+        assert_eq!(serde_json::to_string(&after.stack).unwrap(), paused_projection);
+        assert!(after.stack.active.is_none());
+        assert_eq!(after.stack.stack.len(), 1);
+        assert_eq!(after.next_seq, stale_heartbeat.seq + 1);
+        assert_eq!(after.last_timestamp, Some(stale_heartbeat.timestamp));
+    }
+
     /// Uniqueness across a full replay, asserted rather than assumed. It used to
     /// be a free consequence of `Uuid::new_v4()`; under a derivation it is a
     /// consequence of `seq` uniqueness, and a collision would resolve the *wrong*

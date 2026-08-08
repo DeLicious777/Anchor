@@ -142,6 +142,7 @@ pub fn run() {
             commands::start,
             commands::switch,
             commands::interrupt,
+            commands::pause,
             commands::rename_active,
             commands::add_block,
             commands::move_block,

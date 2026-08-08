@@ -2,8 +2,7 @@
 //! so `recovered-gap` inference (crash or live sleep/wake) never goes stale by
 //! more than the heartbeat interval, per ADR 0004 / the feature doc.
 
-use crate::commands::{apply_transition, emit_state_changed};
-use crate::model::TransitionPayload;
+use crate::commands::{apply_heartbeat_if_active, emit_state_changed};
 use crate::state::AppState;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
@@ -39,16 +38,9 @@ pub fn run(app: AppHandle) {
         let Some(state) = app.try_state::<AppState>() else {
             continue;
         };
-        let is_active = {
-            let inner = state.inner.lock().unwrap();
-            inner.stack.active.is_some()
-        };
-        if !should_beat(is_active) {
-            continue;
-        }
-
-        match apply_transition(&state, |_| TransitionPayload::Heartbeat) {
-            Ok(view) => emit_state_changed(&app, &view),
+        match apply_heartbeat_if_active(&state) {
+            Ok(Some(view)) => emit_state_changed(&app, &view),
+            Ok(None) => {}
             Err(e) => eprintln!("heartbeat append failed: {e}"),
         }
     }

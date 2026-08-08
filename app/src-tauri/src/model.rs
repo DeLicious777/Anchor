@@ -251,6 +251,14 @@ pub enum TransitionPayload {
     Start { name: String, project: Option<String>, client: Option<String> },
     Switch { name: String, project: Option<String>, client: Option<String> },
     Interrupt { name: String, project: Option<String>, client: Option<String> },
+    /// Stop the active task while preserving the intent to return to it.
+    ///
+    /// Pause is a specialised Interrupt with no successor (ADR 0005): it
+    /// closes the active Time Block, pushes the same interruption frame an
+    /// Interrupt would, and leaves `active == None`. There is deliberately no
+    /// persisted paused flag and no Continue transition; the existing return
+    /// transitions are the continuation path.
+    Pause,
     /// Changes the currently active Time Block's identity fields in place —
     /// no new block, no stack effect, start time untouched. Lets a task
     /// started without a name (see `InterruptionStack::next_default_name`)

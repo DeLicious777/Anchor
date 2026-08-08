@@ -195,10 +195,9 @@ pub fn compact(
 ///   8-hour day with zero manual transitions still writes ~480 heartbeat lines,
 ///   which would trigger compaction from heartbeat volume alone — not what the
 ///   trigger is for.
-/// - **`Rename` and `RecoverGap` never count either.** ADR 0004's list is
-///   exhaustive: start / switch / interrupt / return-previous / return-original
-///   / complete. `Rename` is user-triggered but not a lifecycle transition (it
-///   opens and closes nothing); `RecoverGap` is not user-triggered at all.
+/// - **Only ADR 0004's explicit six-transition set counts.** `Rename` is
+///   user-triggered but outside that set; `RecoverGap` is not user-triggered at
+///   all. Later transitions stay non-counting until an ADR changes the set.
 /// - **Replay never counts.** By construction — replay drives
 ///   `InterruptionStack::apply` directly and never touches this type, so
 ///   rebuilding a million-line log advances nothing.
@@ -251,7 +250,12 @@ impl CompactionTrigger {
 fn counts_toward_compaction(payload: &TransitionPayload) -> bool {
     use TransitionPayload::*;
     match payload {
-        Start { .. } | Switch { .. } | Interrupt { .. } | ReturnPrevious | ReturnOriginal | Complete => true,
+        Start { .. }
+        | Switch { .. }
+        | Interrupt { .. }
+        | ReturnPrevious
+        | ReturnOriginal
+        | Complete => true,
         // Enumerated rather than a catch-all `_ => false`, so adding a
         // transition forces a decision here instead of silently defaulting. It
         // has done exactly that for every transition below, all of which
@@ -275,14 +279,12 @@ fn counts_toward_compaction(payload: &TransitionPayload) -> bool {
         // capture of new work, and its volume is negligible and self-limiting
         // in exactly the way `Delete`'s is.
         //
-        // ADR 0004's counting set is the six lifecycle transitions above and
-        // nothing else. What may be added to it is that ADR's business, not an
-        // implementation's: the test here is whether a transition bounds routine
-        // capture growth, never whether it resembles one that counts.
-        //
-        // Recorded as a judgment call extending ADR 0004's rule to transitions
-        // it could not have listed — not as a literal reading of that list.
+        // Pause is a user-triggered lifecycle transition, but ADR 0004 fixes an
+        // explicit six-transition counting set and ADR 0005 says its triggers
+        // remain unchanged. Adding Pause to that set needs an ADR amendment;
+        // this enabling slice preserves the accepted trigger instead.
         Heartbeat
+        | Pause
         | Rename { .. }
         | RecoverGap { .. }
         | EditIdentity { .. }
@@ -304,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn only_user_triggered_lifecycle_transitions_count_toward_the_threshold() {
+    fn only_adr_0004s_six_transitions_count_toward_the_threshold() {
         let mut trigger = CompactionTrigger::default();
 
         for payload in [
@@ -326,7 +328,14 @@ mod tests {
         ] {
             trigger.record(&payload);
         }
-        assert_eq!(trigger.count(), 6, "all six lifecycle transitions count");
+        assert_eq!(trigger.count(), 6, "ADR 0004's exact lifecycle set counts");
+    }
+
+    #[test]
+    fn pause_does_not_silently_expand_adr_0004s_counting_set() {
+        let mut trigger = CompactionTrigger::default();
+        trigger.record(&TransitionPayload::Pause);
+        assert_eq!(trigger.count(), 0);
     }
 
     /// The correction transitions, pinned as a group. Each one postdates ADR
@@ -335,8 +344,7 @@ mod tests {
     /// threshold that exists to bound routine capture growth.
     ///
     /// `DismissFrame` belongs to this group: it resolves a frame rather than
-    /// capturing work, and ADR 0004's counting set is the six lifecycle
-    /// transitions and nothing else.
+    /// capturing work, so it does not advance the routine-capture threshold.
     #[test]
     fn correction_transitions_never_advance_the_trigger() {
         let mut trigger = CompactionTrigger::default();
